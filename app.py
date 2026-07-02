@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 # 1. IMPORTS
 # ============================================================================
 import io
@@ -391,8 +391,8 @@ def get_live_fixtures(api_key, league_id=None) -> pd.DataFrame:
     rows = []
     for item in raw:
         comp  = item.get("competition") or {}
-        ht    = item.get("homeTeam")    or {}
-        at    = item.get("awayTeam")    or {}
+        ht    = item.get("homeTeam") or {}
+        at    = item.get("awayTeam") or {}
         score = item.get("score")       or {}
         ft    = score.get("fullTime")   or {}
         rows.append({
@@ -1877,38 +1877,14 @@ def render_live_ticker(live_df: pd.DataFrame, results_df: pd.DataFrame):
     accent = "#e74c3c" if has_live else "#3498db"
 
     html = f"""
-    <style>
-    .wc-ticker-wrapper {{
-        width: 100%;
-        overflow: hidden;
-        background-color: #0e1117;
-        border: 1px solid {accent};
-        border-radius: 6px;
-        padding: 8px 0;
-        margin: 6px 0 18px 0;
-        box-shadow: 0 0 8px rgba(0,0,0,0.35);
-    }}
-    .wc-ticker-track {{
-        display: inline-block;
-        white-space: nowrap;
-        padding-left: 100%;
-        animation: wc-ticker-scroll 60s linear infinite;
-        color: #e8e8e8;
-        font-size: 14px;
-        font-weight: 500;
-        font-family: 'Courier New', monospace;
-    }}
-    .wc-ticker-wrapper:hover .wc-ticker-track {{
-        animation-play-state: paused;
-    }}
-    @keyframes wc-ticker-scroll {{
-        0%   {{ transform: translateX(0); }}
-        100% {{ transform: translateX(-100%); }}
-    }}
-    </style>
-    <div class="wc-ticker-wrapper">
-        <div class="wc-ticker-track">{ticker_text}</div>
+    <div class="wc-ticker-wrapper" style="width:100%; overflow:hidden; background-color:#0e1117; border:1px solid {accent}; border-radius:6px; padding:8px 0; margin:6px 0 18px 0;">
+        <div class="wc-ticker-track" style="display:inline-block; white-space:nowrap; padding-left:100%; animation:wc-ticker-scroll 60s linear infinite; color:#e8e8e8; font-size:14px; font-weight:500; font-family:'Courier New', monospace;">
+            {ticker_text}
+        </div>
     </div>
+    <style>
+    @keyframes wc-ticker-scroll {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-100%); }} }}
+    </style>
     """
     st.markdown(html, unsafe_allow_html=True)
 
@@ -1957,76 +1933,130 @@ def render_live_knockout_bracket(wc_fixtures_df: pd.DataFrame):
     render_horizontal_bracket(build_live_bracket_state(wc_fixtures_df))
 
 
+# Refactored: Visual settings bar fully removed out of existence. Secrets are resolved securely and defaults are pinned.
 def render_sidebar():
-    st.sidebar.title("Settings")
-    st.sidebar.markdown("---")
-    api_key = st.sidebar.text_input(
-        "Football-Data.org Token", type="password",
-        help="Get a token at https://www.football-data.org/",
-        key="api_key_input",
-    )
-    if api_key:
-        ok, msg = check_api_key(api_key)
-        (st.sidebar.success if ok else st.sidebar.error)(msg)
-    else:
-        st.sidebar.info("Enter your API token to load data.")
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Active Scope")
-    st.sidebar.info("**Competition:** FIFA World Cup\n\n**Season:** 2026 Tournament")
-    fixtures_count = st.sidebar.slider("Fixtures to display", 5, 30, 15)
-
-    if ML_AVAILABLE:
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### ML Engine")
-        if ML_MODEL_PATH.exists():
-            st.sidebar.success("Model loaded ✓")
-        else:
-            st.sidebar.warning("Model not yet trained — will auto-train on first prediction.")
-
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.sidebar.success("Cache cleared!")
-        st.rerun()
-
-    return api_key, WORLD_CUP_LEAGUE_ID, WORLD_CUP_SEASON, fixtures_count
+    api_key = st.secrets.get("FOOTBALL_API_KEY", "")
+    return api_key, WORLD_CUP_LEAGUE_ID, WORLD_CUP_SEASON, 30
 
 
 def render_about_tab():
-    st.header("ℹ️ About This Project")
-    st.markdown("""
-    Welcome to the **World Cup 2026 Predictor & Tournament Simulator**! This system pairs historical analytics and dynamic tracking metrics with classical predictive logic to forecast potential international outcomes.
+    st.markdown(
+        """
+        <div style="background-color:#1e293b; padding:24px; border-radius:10px; border-left:6px solid #f1c40f; margin-bottom:25px;">
+            <h2 style="margin-top:0; color:#f1c40f; font-weight:900; letter-spacing:0.5px;">⚽ Welcome to Ayush’s WorldCup prediction engine!</h2>
+            <p style="font-size:1.1em; color:#f8fafc; line-height:1.6; margin-bottom:0;">
+                This system combines historical analytics, live performance metrics, and mathematical prediction models to forecast potential international football outcomes.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    
+    st.markdown("### 🤔 You may be asking yourself... *HOW DOES THIS EVEN WORK!?*")
+    st.markdown("Let me explain...")
+    st.write("Instead of relying on just one statistic, the model combines several different factors to determine how \"strong\" a national team really is.")
+    
+    st.markdown("---")
+    
+    # Track 1: Recent Form
+    st.markdown(
+        """
+        <h4>📈 <span style="color:#3498db; font-weight:bold;">Recent Form & Nostalgia Decay</span></h4>
+        One of the biggest factors is recent form. Recent matches are given much more weight than less relevant games played years ago using an exponential decay function:
+        """,
+        unsafe_allow_html=True,
+    )
+    st.latex(r"w = e^{-\lambda \cdot t}")
+    st.markdown(
+        """
+        where older matches gradually become less important over time. This helps <strong>eliminate nostalgia bias</strong> because what really matters is how a team is playing right now.
+        """,
+        unsafe_allow_html=True,
+    )
 
-    ### 🧠 How It Works & The Mathematics
-    * **Blended Performance Metrics:** National squads are assigned dynamic rating weights derived from distinct analytical tracks:
-        * **Time-Decayed Points Profiling:** Recent international games hold exponentially higher mathematical significance than older matches ($w = e^{\lambda \cdot t}$).
-        * **Strength of Schedule (SoS) Adjustments:** Scoring metrics are dynamically scaled up or down based on the baseline capabilities of your opponents.
-        * **Global Baseline Elo Integration:** Anchored directly into live, real-time international soccer Elo datasets.
-    * **Poisson Modeling Strategy:** Precisions for exact matching scores are calculated using a joint probability mass function mapped over home/away offensive and defensive metrics:
-        $$P(X=k, Y=m) = \frac{\lambda^k e^{-\lambda}}{k!} \times \frac{\mu^m e^{-\mu}}{m!}$$
-    * **Stochastic Monte Carlo Simulations:** To map potential paths inside single-elimination formats without tournament bracket bottleneck bias, thousands of random structural trees are evaluated to track steady reach-rate probabilities.
+    # Track 2: SoS
+    st.markdown(
+        """
+        <br>
+        <h4>⚔️ <span style="color:#e67e22; font-weight:bold;">Strength of Schedule (SoS) scaling</span></h4>
+        Beating a world-class team is worth far more than beating a lower-ranked team (<em>duh!</em>), while losing to an elite opponent is less damaging than losing to a weaker side. After all, in a knockout tournament like the World Cup, you know what they say: <em>"You gotta beat the best to be the best."</em> 😉
+        """,
+        unsafe_allow_html=True,
+    )
 
-    ### 🛠️ Technology Stack
-    * **Application Base Framework:** Streamlit Core Engine
-    * **Parsers & Ingestion Tools:** BeautifulSoup4, Requests Library, LXML
-    * **Mathematical Core Structures:** NumPy, Pandas DataFrames, SciPy Statistical Toolkits
-    * **Visual Presentation Graphics:** Plotly Express & Plotly Graph Objects Engine
-    * **Machine Learning Pipelines:** XGBoost Classifier Optimization Core
-    * **Context-Aware Analytics Assistant:** Google GenAI SDK (`gemini-2.5-flash`)
+    # Track 3: Elo Baseline
+    st.markdown(
+        """
+        <br>
+        <h4>🧮 <span style="color:#9b59b6; font-weight:bold;">Live Elo Integration</span></h4>
+        The model also incorporates live Elo ratings, which estimate each team's overall strength based on previous results. Elo calculates the expected outcome of a match using each team's rating before adjusting those ratings after every game. This gives the model a <strong>strong baseline</strong> instead of making predictions with no context of how much quality a team has.
+        """,
+        unsafe_allow_html=True,
+    )
 
-    ### 📖 How to Use
-    1.  Inspect active or upcoming competitive structures inside **Live Fixtures**.
-    2.  Review global ratings and baseline traits under **Team Ratings**.
-    3.  Head to **Match Predictor** to configure arbitrary single-match variables—*be sure to use **Load Conditions** to scrape dynamic squad data like injury lists, club form, and international experience factors.*
-    4.  Run multi-tournament paths under **World Cup Simulator** to parse overall championship title likelihood metrics.
-    """)
+    # Track 4: Poisson distribution
+    st.markdown(
+        """
+        <br>
+        <h4>📊 <span style="color:#2ecc71; font-weight:bold;">Poisson Exact Scoreline Matrix</span></h4>
+        To predict actual scorelines, the model uses a Poisson distribution, a mathematical model commonly used for low-scoring sports like soccer. Using each team's expected goals (<span style="color:#2ecc71; font-weight:bold;">$\lambda$</span>), it calculates the probability of scoring exactly 0, 1, 2, 3, or more goals, allowing it to estimate the likelihood of every possible scoreline from 0-0 to 3-2 and beyond.
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Track 5: Monte Carlo format simulations
+    st.markdown(
+        """
+        <br>
+        <h4>🎲 <span style="color:#f1c40f; font-weight:bold;">Stochastic Monte Carlo Bracket Simulations</span></h4>
+        And finally, the entire tournament is run through thousands of Monte Carlo simulations. Each simulated tournament randomly selects winners based on the calculated match probabilities. By repeating this process thousands of times, the model measures how often each team reaches the <strong>Round of 16, Quarterfinals, Semifinals, Final, or lifts the trophy</strong>. Those percentages become each team's estimated chances of advancing through the tournament and ultimately becoming World Champions.
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    # Manual section
+    st.markdown(
+        """
+        <div style="background-color:#1e1e24; padding:20px; border-radius:8px; border:1px solid #333;">
+            <h3 style="margin-top:0; color:#ffffff;">📖 How to Use</h3>
+            <ol style="line-height:1.8; color:#ddd;">
+                <li>Inspect active or upcoming competitive structures inside <span style="color:#3498db; font-weight:500;">Live Fixtures</span>.</li>
+                <li>Review global ratings and baseline traits under <span style="color:#9b59b6; font-weight:500;">Team Ratings</span>.</li>
+                <li>Head to <span style="color:#e67e22; font-weight:500;">Match Predictor</span> to configure arbitrary single-match variables—<em>be sure to use <strong>Load Conditions</strong> to scrape dynamic squad data like injury lists, club form, and international experience factors.</em></li>
+                <li>Run multi-tournament paths under <span style="color:#f1c40f; font-weight:500;">World Cup Simulator</span> to parse overall championship title likelihood metrics.</li>
+            </ol>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Stack section
+    st.markdown(
+        """
+        <div style="background-color:#111; padding:20px; border-radius:8px; border:1px solid #222;">
+            <h3 style="margin-top:0; color:#ffffff;">🛠️ Tech Stack</h3>
+            <ul style="list-style-type:none; padding-left:0; line-height:1.9; color:#bbb;">
+                <li> <strong>Application Base Framework:</strong> Streamlit Core Engine</li>
+                <li> <strong>Parsers & Ingestion Tools:</strong> BeautifulSoup4, Requests Library, LXML</li>
+                <li> <strong>Mathematical Core Structures:</strong> NumPy, Pandas DataFrames, SciPy Statistical Toolkits</li>
+                <li> <strong>Visual Presentation Graphics:</strong> Plotly Express & Plotly Graph Objects Engine</li>
+                <li> <strong>Machine Learning Pipelines:</strong> XGBoost Classifier Optimization Core</li>
+                <li> <strong>Context-Aware Analytics Assistant:</strong> Google GenAI SDK (<span style="font-family:monospace; color:#2ecc71;">gemini-2.5-flash</span>)</li>
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_live_fixtures_tab(api_key, live_df, fixtures_df, results_df, wc_fixtures_df=None):
     st.header("Live Fixtures")
     if not api_key:
-        st.info("Enter your API token in the sidebar to load fixtures.")
+        st.info("API Token connection missing from secrets management configuration.")
         return
 
     bracket_sources = [
@@ -2066,7 +2096,7 @@ def render_team_ratings_tab(api_key, team_stats_df):
         "performance + 0.40 × baseline global Elo modifier. Ties broken by higher GF/Game."
     )
     if not api_key:
-        st.info("Enter your API token to load team ratings.")
+        st.info("API Token connection missing from secrets management configuration.")
         return
     if team_stats_df.empty:
         st.info("No completed matches found yet for this competition/season.")
@@ -2095,7 +2125,7 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
     st.caption(f"Predictions via blended xP/SoS/Elo ratings + Poisson + Monte Carlo. {ml_badge}. Squad conditions auto-loaded.")
 
     if not api_key:
-        st.info("Enter your API token in the sidebar to use the predictor.")
+        st.info("API Token connection missing from secrets management configuration.")
         return
     if team_stats_df.empty:
         st.info("No team data available yet.")
@@ -2127,9 +2157,9 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
 
     if load_btn:
         with st.spinner(f"Fetching {team_a}..."):
-            st.session_state[f"saf_{team_a}"] = fetch_team_saf(team_a)
+            st.session_state[f"saf_{team_a}"] = fetch_team_saf(team_name=team_a)
         with st.spinner(f"Fetching {team_b}..."):
-            st.session_state[f"saf_{team_b}"] = fetch_team_saf(team_b)
+            st.session_state[f"saf_{team_b}"] = fetch_team_saf(team_name=team_b)
         has_a = has_b = True
 
     if has_a and has_b:
@@ -2138,8 +2168,8 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
         saf_a = saf_data_a.get("composite", 0.85)
         saf_b = saf_data_b.get("composite", 0.85)
         cc1, cc2 = st.columns(2)
-        with cc1: render_saf_breakdown_card(team_a, saf_data_a)
-        with cc2: render_saf_breakdown_card(team_b, saf_data_b)
+        with cc1: render_saf_breakdown_card(team_name=team_a, saf_data=saf_data_a)
+        with cc2: render_saf_breakdown_card(team_name=team_b, saf_data=saf_data_b)
     else:
         saf_a = saf_b = 0.85
         st.info("Click **Load Conditions** to auto-fetch squad data.")
@@ -2244,7 +2274,7 @@ def render_world_cup_tab(api_key, model_bundle):
 
     if run_clicked:
         if not api_key:
-            st.warning("Enter your API token first.")
+            st.warning("API Token missing from cloud secrets management configuration.")
         else:
             with st.spinner("Loading World Cup data..."):
                 wc_stats    = get_team_stats(api_key, WORLD_CUP_LEAGUE_ID, WORLD_CUP_SEASON)
@@ -2388,12 +2418,27 @@ def render_gemini_chatbot():
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
+    # Chat history UI render loop
     for msg in st.session_state["chat_history"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask the AI about simulation logic, bottlenecks, or specific team chances..."):
+    # Cooldown Rate Limiting Logic (60 seconds)
+    last_time = st.session_state.get("last_chat_time", 0.0)
+    current_time = time.time()
+    cooldown_limit = 60.0
+    elapsed_time = current_time - last_time
+    
+    if elapsed_time < cooldown_limit:
+        remaining_seconds = int(cooldown_limit - elapsed_time)
+        st.warning(f"Active: Please wait {remaining_seconds} seconds and start a new simulation before requesting your next tactical report.")
+        disabled_input = True
+    else:
+        disabled_input = False
+
+    if prompt := st.chat_input("Ask the AI about simulation logic, bottlenecks, or specific team chances...", disabled=disabled_input):
         st.session_state["chat_history"].append({"role": "user", "content": prompt})
+        st.session_state["last_chat_time"] = time.time()
         with st.chat_message("user"):
             st.markdown(prompt)
 
@@ -2409,6 +2454,7 @@ def render_gemini_chatbot():
                 response = chat.send_message(prompt)
                 st.markdown(response.text)
                 st.session_state["chat_history"].append({"role": "assistant", "content": response.text})
+                st.rerun()
             except Exception as e:
                 st.error(f"Error communicating with Gemini API: {e}")
 
@@ -2418,7 +2464,7 @@ def render_gemini_chatbot():
 # ============================================================================
 
 def main():
-    st.set_page_config(page_title="World Cup Predictor 2026", layout="wide")
+    st.set_page_config(page_title="World Cup Predictor 2026", page_icon="⚽", layout="wide")
 
     model_bundle = load_ml_model() if ML_AVAILABLE else None
     api_key, league_id, season, fixtures_count = render_sidebar()
