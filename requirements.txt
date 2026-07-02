@@ -1,0 +1,11 @@
+numpy
+pandas
+plotly
+requests
+beautifulsoup4
+lxml
+scipy
+xgboost
+joblib
+scikit-learn
+google-generativeai
