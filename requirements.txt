@@ -9,3 +9,4 @@ xgboost
 joblib
 scikit-learn
 google-generativeai
+matplotlib
