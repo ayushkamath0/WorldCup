@@ -1246,6 +1246,20 @@ def render_visual_bracket():
         margin-bottom: 8px;
         filter: drop-shadow(0 0 10px rgba(241,196,15,0.4));
     }
+    /* Mobile: swap truncation for wrapping so team names are never clipped.
+       Sidebar is untouched — these rules are scoped to bracket classes only. */
+    @media (max-width: 768px) {
+        .bracket-container {
+            min-width: 0;
+        }
+        .bracket-team-row {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+    }
     </style>
     """
 
@@ -2034,13 +2048,21 @@ def render_live_ticker(live_df: pd.DataFrame, results_df: pd.DataFrame):
     accent = "#e74c3c" if has_live else "#3498db"
 
     html = f"""
-    <div class="wc-ticker-wrapper" style="width:100%; overflow:hidden; background-color:#0e1117; border:1px solid {accent}; border-radius:6px; padding:8px 0; margin:6px 0 18px 0;">
-        <div class="wc-ticker-track" style="display:inline-block; white-space:nowrap; padding-left:100%; animation:wc-ticker-scroll 60s linear infinite; color:#e8e8e8; font-size:14px; font-weight:500; font-family:'Courier New', monospace;">
+    <div class="wc-ticker-wrapper" style="width:100%; overflow:hidden; background-color:#0e1117; border:1px solid {accent}; border-radius:6px; padding:8px 0; margin:6px 0 18px 0; position: relative;">
+        <div class="wc-ticker-track" style="display:inline-block; white-space:nowrap; padding-left:100%; animation:wc-ticker-scroll 60s linear infinite; color:#e8e8e8; font-size:14px; font-weight:500; font-family:'Courier New', monospace; will-change: transform;">
             {ticker_text}
         </div>
     </div>
     <style>
-    @keyframes wc-ticker-scroll {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-100%); }} }}
+    /* Ensure the wrapper does not trigger browser-level scroll behavior */
+    .wc-ticker-wrapper {{ 
+        display: block; 
+        max-width: 100%; 
+    }}
+    @keyframes wc-ticker-scroll {{ 
+        0% {{ transform: translateX(0); }} 
+        100% {{ transform: translateX(-100%); }} 
+    }}
     </style>
     """
     st.markdown(html, unsafe_allow_html=True)
@@ -2068,15 +2090,31 @@ def _is_confirmed_team(name) -> bool:
 
 
 ACTIVE_FIXTURE_STATUSES = {"SCHEDULED", "TIMED", "IN_PLAY"}
+COMPLETED_FIXTURE_STATUSES = {"FINISHED"}
 
 
 def compute_active_teams(fixtures_df: pd.DataFrame) -> set[str]:
-    """A team is 'alive' if it appears in any upcoming/in-play match."""
+    """A team is 'alive' if it appears in any upcoming/in-play match.
+    Used by the World Cup Simulator tab (elimination-status styling) and the
+    Team Ratings insight cards, where 'still in the tournament' genuinely means
+    'has a fixture left to play'."""
     if fixtures_df is None or fixtures_df.empty or "Status" not in fixtures_df.columns:
         return set()
     upcoming = fixtures_df[fixtures_df["Status"].isin(ACTIVE_FIXTURE_STATUSES)]
     teams = set(upcoming.get("Home", pd.Series(dtype=str)).tolist()) | \
             set(upcoming.get("Away", pd.Series(dtype=str)).tolist())
+    return {t for t in teams if _is_confirmed_team(t)}
+
+
+def compute_confirmed_teams(fixtures_df: pd.DataFrame) -> set[str]:
+    """Match Predictor variant: the [IN]/[OUT] label here is meant to reflect
+    settled, on-the-record results only, so it only looks at FINISHED matches
+    and ignores SCHEDULED/TIMED/IN_PLAY fixtures entirely."""
+    if fixtures_df is None or fixtures_df.empty or "Status" not in fixtures_df.columns:
+        return set()
+    completed = fixtures_df[fixtures_df["Status"].isin(COMPLETED_FIXTURE_STATUSES)]
+    teams = set(completed.get("Home", pd.Series(dtype=str)).tolist()) | \
+            set(completed.get("Away", pd.Series(dtype=str)).tolist())
     return {t for t in teams if _is_confirmed_team(t)}
 
 
@@ -2088,6 +2126,90 @@ def render_live_knockout_bracket(wc_fixtures_df: pd.DataFrame):
         render_horizontal_bracket(build_live_bracket_state(pd.DataFrame()))
         return
     render_horizontal_bracket(build_live_bracket_state(wc_fixtures_df))
+
+def _inject_global_css():
+    """App-wide CSS: compact About-tab typography."""
+    st.markdown(
+        """
+        <style>
+        /* Compact About-tab typography (mobile-friendly) */
+        .about-hero {
+            background-color:#1e293b;
+            padding:14px 18px;
+            border-radius:10px;
+            border-left:6px solid #f1c40f;
+            margin-bottom:14px;
+        }
+        .about-hero h2 {
+            margin-top:0;
+            margin-bottom:6px;
+            color:#f1c40f;
+            font-weight:900;
+            letter-spacing:0.3px;
+            font-size:1.35em;
+            line-height:1.25;
+        }
+        .about-hero p {
+            font-size:.92em;
+            color:#f8fafc;
+            line-height:1.45;
+            margin-bottom:0;
+        }
+        .about-subhead {
+            font-size:1.05em;
+            font-weight:700;
+            margin:10px 0 2px 0;
+        }
+        .about-compact {
+            font-size:.88em;
+            line-height:1.45;
+            margin:2px 0 6px 0;
+        }
+        h4.about-track {
+            margin:10px 0 2px 0;
+            font-size:1em;
+        }
+
+        .tab-guide {
+            background-color:#161a23;
+            border:1px solid #2a2f3a;
+            border-radius:8px;
+            padding:12px 16px;
+            margin:2px 0 14px 0;
+        }
+        .tab-guide-lede {
+            font-size:.88em;
+            color:#ddd;
+            margin:0 0 8px 0;
+            line-height:1.4;
+        }
+        .tab-guide-list {
+            list-style-type:none;
+            padding-left:0;
+            margin:0;
+            line-height:1.7;
+            font-size:.88em;
+            color:#ccc;
+        }
+        .tab-guide-icon {
+            display:inline-block;
+            width:1.4em;
+        }
+
+        @media (max-width: 640px) {
+            .about-hero { padding:10px 12px; margin-bottom:10px; }
+            .about-hero h2 { font-size:1.1em; }
+            .about-hero p { font-size:.85em; }
+            .about-subhead { font-size:.95em; }
+            .about-compact { font-size:.82em; }
+            .tab-guide { padding:10px 12px; }
+            .tab-guide-lede, .tab-guide-list { font-size:.82em; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 def _inject_tab_nav_css():
     """Styles the st.radio-based navigation bar to visually read as st.tabs,
@@ -2136,18 +2258,18 @@ def _inject_tab_nav_css():
 
 
 def render_tab_nav() -> str:
-    """Renders the session-state-backed top navigation bar and returns the
-    currently active tab label. Because the value lives in
-    st.session_state['active_tab'], any button elsewhere in the app (e.g. the
-    'How to Use' jump-links in the About tab) can redirect navigation simply
-    by setting that key and calling st.rerun()."""
-    if "nav_redirect" in st.session_state:
-        st.session_state["active_tab"] = st.session_state.pop("nav_redirect")
-
+    # 1. Look for a redirect request
+    if "nav_redirect" in st.session_state and st.session_state["nav_redirect"]:
+        st.session_state["active_tab"] = st.session_state["nav_redirect"]
+        st.session_state["nav_redirect"] = None # Clear it immediately
+        
+    # 2. Ensure default
     if "active_tab" not in st.session_state:
         st.session_state["active_tab"] = TAB_LABELS[0]
 
     _inject_tab_nav_css()
+    
+    # 3. The radio is now driven by 'active_tab'
     return st.radio(
         "Navigation",
         TAB_LABELS,
@@ -2162,37 +2284,52 @@ def render_sidebar():
     return api_key, WORLD_CUP_LEAGUE_ID, WORLD_CUP_SEASON, 30
 
 
+def update_nav(target):
+    st.session_state["nav_redirect"] = target
+
 def render_about_tab():
     st.markdown(
         """
-        <div style="background-color:#1e293b; padding:24px; border-radius:10px; border-left:6px solid #f1c40f; margin-bottom:25px;">
-            <h2 style="margin-top:0; color:#f1c40f; font-weight:900; letter-spacing:0.5px;">⚽ Welcome to Ayush’s WorldCup prediction engine!</h2>
-            <p style="font-size:1.1em; color:#f8fafc; line-height:1.6; margin-bottom:0;">
-                This system combines historical analytics, live performance metrics, and mathematical prediction models to forecast potential international football outcomes.
-            </p>
+        <div class="about-hero">
+            <h2>⚽ Welcome to Ayush’s WorldCup prediction engine!</h2>
+            <p>This system combines historical analytics, live performance metrics, and mathematical prediction models to forecast potential international football outcomes.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    
-    st.markdown("### 🤔 You may be asking yourself... *HOW DOES THIS EVEN WORK!?*")
-    st.markdown("Let me explain...")
-    st.write("Instead of relying on just one statistic, the model combines several different factors to determine how \"strong\" a national team really is.")
-    
+
+    st.markdown(
+        """
+        <div class="tab-guide">
+            <p class="tab-guide-lede">You can jump between sections any time using the <strong>tabs in the top navigation bar</strong>. Here's what each one does:</p>
+            <ul class="tab-guide-list">
+                <li><span class="tab-guide-icon">📅</span><strong>Live Fixtures</strong> &mdash; browse upcoming, in-play, and recently completed matches.</li>
+                <li><span class="tab-guide-icon">📊</span><strong>Team Ratings</strong> &mdash; explore the blended rating engine and see how every team stacks up.</li>
+                <li><span class="tab-guide-icon">⚔️</span><strong>Match Predictor</strong> &mdash; pick any two teams and simulate a single head-to-head matchup.</li>
+                <li><span class="tab-guide-icon">🏆</span><strong>World Cup Simulator</strong> &mdash; run thousands of Monte Carlo tournaments to see each team's title odds.</li>
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="about-subhead">🤔 You may be asking yourself... <em>HOW DOES THIS EVEN WORK!?</em></div>', unsafe_allow_html=True)
+    st.markdown('<p class="about-compact">Let me explain... Instead of relying on just one statistic, the model combines several different factors to determine how "strong" a national team really is.</p>', unsafe_allow_html=True)
+
     st.markdown("---")
-    
+
     # Track 1: Recent Form
     st.markdown(
         """
-        <h4> <span style="color:#3498db; font-weight:bold;">Recent Form & Nostalgia Decay</span></h4>
-        One of the biggest factors is recent form. Recent matches are given much more weight than less relevant games played years ago using an exponential decay function:
+        <h4 class="about-track"><span style="color:#3498db; font-weight:bold;">Recent Form & Nostalgia Decay</span></h4>
+        <p class="about-compact">One of the biggest factors is recent form. Recent matches are given much more weight than less relevant games played years ago using an exponential decay function:</p>
         """,
         unsafe_allow_html=True,
     )
     st.latex(r"w = e^{-\lambda \cdot t}")
     st.markdown(
         """
-        where older matches gradually become less important over time. This helps <strong>eliminate nostalgia bias</strong> because what really matters is how a team is playing right now.
+        <p class="about-compact">where older matches gradually become less important over time. This helps <strong>eliminate nostalgia bias</strong> because what really matters is how a team is playing right now.</p>
         """,
         unsafe_allow_html=True,
     )
@@ -2200,9 +2337,8 @@ def render_about_tab():
     # Track 2: SoS
     st.markdown(
         """
-        <br>
-        <h4> <span style="color:#e67e22; font-weight:bold;">Strength of Schedule (SoS) scaling</span></h4>
-        Beating a world-class team is worth far more than beating a lower-ranked team (<em>duh!</em>), while losing to an elite opponent is less damaging than losing to a weaker side. After all, in a knockout tournament like the World Cup, you know what they say: <em>"You gotta beat the Best to be the Best."</em> 😉
+        <h4 class="about-track"><span style="color:#e67e22; font-weight:bold;">Strength of Schedule (SoS) scaling</span></h4>
+        <p class="about-compact">Beating a world-class team is worth far more than beating a lower-ranked team (<em>duh!</em>), while losing to an elite opponent is less damaging than losing to a weaker side. After all, in a knockout tournament like the World Cup, you know what they say: <em>"You gotta beat the Best to be the Best."</em> 😉</p>
         """,
         unsafe_allow_html=True,
     )
@@ -2210,9 +2346,8 @@ def render_about_tab():
     # Track 3: Elo Baseline
     st.markdown(
         """
-        <br>
-        <h4> <span style="color:#9b59b6; font-weight:bold;">Live Elo Integration</span></h4>
-        The model also incorporates live Elo ratings, which estimate each team's overall strength based on previous results. Elo calculates the expected outcome of a match using each team's rating before adjusting those ratings after every game. This gives the model a <strong>strong baseline</strong> instead of making predictions with no context of how much quality a team has.
+        <h4 class="about-track"><span style="color:#9b59b6; font-weight:bold;">Live Elo Integration</span></h4>
+        <p class="about-compact">The model also incorporates live Elo ratings, which estimate each team's overall strength based on previous results. Elo calculates the expected outcome of a match using each team's rating before adjusting those ratings after every game. This gives the model a <strong>strong baseline</strong> instead of making predictions with no context of how much quality a team has.</p>
         """,
         unsafe_allow_html=True,
     )
@@ -2220,9 +2355,8 @@ def render_about_tab():
     # Track 4: Poisson distribution
     st.markdown(
         """
-        <br>
-        <h4> <span style="color:#2ecc71; font-weight:bold;">Poisson Exact Scoreline Matrix</span></h4>
-        To predict actual scorelines, the model uses a Poisson distribution, a mathematical model commonly used for low-scoring sports like soccer. Using each team's expected goals (&lambda;), it calculates the probability of scoring exactly 0, 1, 2, 3, or more goals, allowing it to estimate the likelihood of every possible scoreline from 0-0 to 3-2 and beyond.
+        <h4 class="about-track"><span style="color:#2ecc71; font-weight:bold;">Poisson Exact Scoreline Matrix</span></h4>
+        <p class="about-compact">To predict actual scorelines, the model uses a Poisson distribution, a mathematical model commonly used for low-scoring sports like soccer. Using each team's expected goals (&lambda;), it calculates the probability of scoring exactly 0, 1, 2, 3, or more goals, allowing it to estimate the likelihood of every possible scoreline from 0-0 to 3-2 and beyond.</p>
         """,
         unsafe_allow_html=True,
     )
@@ -2230,73 +2364,28 @@ def render_about_tab():
     # Track 5: Monte Carlo format simulations
     st.markdown(
         """
-        <br>
-        <h4> <span style="color:#f1c40f; font-weight:bold;">Stochastic Monte Carlo Bracket Simulations</span></h4>
-        And finally, the entire tournament is run through thousands of Monte Carlo simulations. Each simulated tournament randomly selects winners based on the calculated match probabilities. By repeating this process thousands of times, the model measures how often each team reaches the <strong>Round of 16, Quarterfinals, Semifinals, Final, or lifts the trophy</strong>. Those percentages become each team's estimated chances of advancing through the tournament and ultimately becoming World Champions.
+        <h4 class="about-track"><span style="color:#f1c40f; font-weight:bold;">Stochastic Monte Carlo Bracket Simulations</span></h4>
+        <p class="about-compact">And finally, the entire tournament is run through thousands of Monte Carlo simulations. Each simulated tournament randomly selects winners based on the calculated match probabilities. By repeating this process thousands of times, the model measures how often each team reaches the <strong>Round of 16, Quarterfinals, Semifinals, Final, or lifts the trophy</strong>. Those percentages become each team's estimated chances of advancing through the tournament and ultimately becoming World Champions.</p>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
 
-    # Manual section: now safely utilizing the Proxy redirect pattern to bypass write-locks
     st.markdown(
         """
-        <div style="background-color:#1e1e24; padding:20px 20px 6px 20px; border-radius:8px 8px 0 0; border:1px solid #333; border-bottom:none;">
-            <h3 style="margin-top:0; color:#ffffff;">📖 How to Use</h3>
-            <p style="color:#999; font-size:.9em; margin-bottom:4px;">Click any step to jump straight there.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    how_to_steps = [
-        ("1️⃣", "#3498db", "Live Fixtures",
-         "Inspect active or upcoming competitive structures.", TAB_LABELS[1]),
-        ("2️⃣", "#9b59b6", "Team Ratings",
-         "Review global ratings and baseline traits.", TAB_LABELS[2]),
-        ("3️⃣", "#e67e22", "Match Predictor",
-         "Configure single-match variables — use Load Conditions to scrape dynamic squad, injury, form, and experience data.", TAB_LABELS[3]),
-        ("4️⃣", "#f1c40f", "World Cup Simulator",
-         "Run multi-tournament paths to parse overall championship title likelihood metrics.", TAB_LABELS[4]),
-    ]
-
-    with st.container(border=False):
-        st.markdown(
-            '<div style="background-color:#1e1e24; padding:4px 20px 14px 20px; border-radius:0 0 8px 8px; border:1px solid #333; border-top:none;">',
-            unsafe_allow_html=True,
-        )
-        for num, color, title, desc, target in how_to_steps:
-            row_l, row_r = st.columns([6, 1])
-            with row_l:
-                st.markdown(
-                    f'<div style="padding:6px 0;">{num} '
-                    f'<span style="color:{color}; font-weight:600;">{title}</span>'
-                    f'<br><span style="color:#ccc; font-size:.88em;">{desc}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            with row_r:
-                st.markdown('<div style="padding-top:10px;">', unsafe_allow_html=True)
-                if st.button("Go →", key=f"jump_to_{target}", use_container_width=True):
-                    st.session_state["nav_redirect"] = target
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Stack section
-    st.markdown(
-        """
-        <div style="background-color:#111; padding:20px; border-radius:8px; border:1px solid #222;">
-            <h3 style="margin-top:0; color:#ffffff;">🛠️ Tech Stack</h3>
-            <ul style="list-style-type:none; padding-left:0; line-height:1.9; color:#bbb;">
-                <li> <strong>Application Base Framework:</strong> Streamlit Core Engine</li>
-                <li> <strong>Parsers & Ingestion Tools:</strong> BeautifulSoup4, Requests Library, LXML</li>
-                <li> <strong>Mathematical Core Structures:</strong> NumPy, Pandas DataFrames, SciPy Statistical Toolkits</li>
-                <li> <strong>Visual Presentation Graphics:</strong> Plotly Express & Plotly Graph Objects Engine</li>
-                <li> <strong>Machine Learning Pipelines:</strong> XGBoost Classifier Optimization Core</li>
-                <li> <strong>Context-Aware Analytics Assistant:</strong> Google GenAI SDK (<span style="font-family:monospace; color:#2ecc71;">gemini-2.5-flash</span>)</li>
+        <div style="background-color:#111; padding:14px 18px; border-radius:8px; border:1px solid #222;">
+            <h3 style="margin-top:0; margin-bottom:8px; color:#ffffff; font-size:1.15em;">🛠️ Tech Stack</h3>
+            <ul style="list-style-type:none; padding-left:0; line-height:1.75; color:#bbb; font-size:.88em; margin-bottom:0;">
+                <li><strong style="color:#f1c40f;">App &amp; UI:</strong> Streamlit (fragment-based reactive routing), custom CSS/HTML component styling</li>
+                <li><strong style="color:#3498db;">Data Science:</strong> NumPy, Pandas &mdash; time-decay weighting, SoS-adjusted rating engine</li>
+                <li><strong style="color:#9b59b6;">Machine Learning:</strong> XGBoost + scikit-learn (StandardScaler, train/test split) blended with a Poisson statistical model</li>
+                <li><strong style="color:#2ecc71;">Statistical Modeling:</strong> SciPy (Poisson distributions), vectorized scoreline matrices, Monte Carlo tournament simulation</li>
+                <li><strong style="color:#e67e22;">Live Data Integration:</strong> Football-Data.org REST API, requests, custom caching layer (<code>st.cache_data</code>)</li>
+                <li><strong style="color:#1abc9c;">Web Scraping / ETL:</strong> BeautifulSoup4 &mdash; automated FBref form, Transfermarkt squad, and Elo ranking pipelines</li>
+                <li><strong style="color:#e74c3c;">Conversational AI:</strong> Google Gemini API &mdash; context-aware analyst chatbot grounded in live simulation state</li>
+                <li><strong style="color:#f1c40f;">Visualization:</strong> Plotly (Express &amp; Graph Objects) &mdash; interactive rating charts &amp; live bracket rendering</li>
+                <li><strong style="color:#3498db;">Engineering Practices:</strong> Modular pipeline architecture, defensive API error-handling, reproducible model persistence via Joblib</li>
             </ul>
         </div>
         """,
@@ -2340,18 +2429,224 @@ def render_live_fixtures_tab(api_key, live_df, fixtures_df, results_df, wc_fixtu
     st.caption(f"Last refreshed: {datetime.now():%Y-%m-%d %H:%M:%S}")
 
 
-def render_team_ratings_tab(api_key, team_stats_df):
+def _build_insight_cards(team_stats_df: pd.DataFrame, active_teams: set[str],
+                          eliminated_teams: set[str] = frozenset()) -> list[tuple]:
+    df = team_stats_df
+    has_gp = "Games Played" in df.columns
+    played = df[df["Games Played"] > 0] if has_gp else df
+    spread_df = (df.dropna(subset=["Rating", "Elo Mod"]) if {"Rating", "Elo Mod"}.issubset(df.columns) else df.iloc[0:0])
+
+    cards = []
+
+    # 👹 Battle-Tested - highest SoS among teams NOT already eliminated
+    sos_df = played.dropna(subset=["SoS"]) if "SoS" in played.columns else played.iloc[0:0]
+    if not sos_df.empty and eliminated_teams:
+        elim_list = {t.strip().lower() for t in eliminated_teams}
+        sos_df = sos_df[~sos_df["Team"].str.strip().str.lower().isin(elim_list)]
+        
+    if not sos_df.empty:
+        row = sos_df.loc[sos_df["SoS"].idxmax()]
+        cards.append(("👹", "Battle-Tested", row["Team"], f"SoS {row['SoS']:.1f}"))
+    else:
+        cards.append(("👹", "Battle-Tested", None, "No data yet"))
+
+    # ... (Keep the rest of your existing card logic here)
+    # 🚀 Dark Horse
+    if not spread_df.empty:
+        spread = spread_df["Rating"] - spread_df["Elo Mod"]
+        idx = spread.idxmax()
+        row = spread_df.loc[idx]
+        cards.append(("🚀", "Dark Horse", row["Team"], f"+{spread.loc[idx]:.3f} vs Elo"))
+    else:
+        cards.append(("🚀", "Dark Horse", None, "No data yet"))
+
+    # 🏆 Best Form
+    if not played.empty and "PPG" in played.columns:
+        row = played.loc[played["PPG"].idxmax()]
+        cards.append(("🏆", "Best Form", row["Team"], f"{row['PPG']:.2f} PPG"))
+    else:
+        cards.append(("🏆", "Best Form", None, "No data yet"))
+
+    # ⚔️ Goal Machine
+    gm_pool = played[played["Team"].isin(active_teams)] if active_teams else played
+    if gm_pool.empty: gm_pool = played
+    if not gm_pool.empty and "GF/Game" in gm_pool.columns:
+        row = gm_pool.loc[gm_pool["GF/Game"].idxmax()]
+        cards.append(("⚔️", "Goal Machine", row["Team"], f"{row['GF/Game']:.2f} GF/Game"))
+    else:
+        cards.append(("⚔️", "Goal Machine", None, "No data yet"))
+
+    # 🛡️ Fortress
+    if not played.empty and "GA/Game" in played.columns:
+        row = played.loc[played["GA/Game"].idxmin()]
+        cards.append(("🛡️", "Fortress", row["Team"], f"{row['GA/Game']:.2f} GA/Game"))
+    else:
+        cards.append(("🛡️", "Fortress", None, "No data yet"))
+
+    # 💪 Strongest Resume
+    if not df.empty and "Rating" in df.columns:
+        row = df.loc[df["Rating"].idxmax()]
+        cards.append(("💪", "Strongest Resume", row["Team"], f"{row['Rating']:.3f} Rating"))
+    else:
+        cards.append(("💪", "Strongest Resume", None, "No data yet"))
+
+    # 📈 Rising Power
+    if not spread_df.empty:
+        rising = spread_df[(spread_df["Rating"] - spread_df["Elo Mod"]) >= 0.1]
+        if not rising.empty:
+            margin = rising["Rating"] - rising["Elo Mod"]
+            idx = margin.idxmax()
+            row = rising.loc[idx]
+            cards.append(("📈", "Rising Power", row["Team"], f"+{margin.loc[idx]:.3f} vs Elo"))
+        else:
+            cards.append(("📈", "Rising Power", None, "No team clears +0.10"))
+    else:
+        cards.append(("📈", "Rising Power", None, "No data yet"))
+
+    # 📉 Living on Reputation
+    if not spread_df.empty:
+        reputation = spread_df[(spread_df["Elo Mod"] - spread_df["Rating"]) >= 0.1]
+        if not reputation.empty:
+            margin = reputation["Elo Mod"] - reputation["Rating"]
+            idx = margin.idxmax()
+            row = reputation.loc[idx]
+            cards.append(("📉", "Living on Reputation", row["Team"], f"+{margin.loc[idx]:.3f} vs Rating"))
+        else:
+            cards.append(("📉", "Living on Reputation", None, "No team clears +0.10"))
+    else:
+        cards.append(("📉", "Living on Reputation", None, "No data yet"))
+
+    return cards
+
+
+INSIGHT_CARD_LEGEND = [
+    ("👹", "Battle-Tested", "Highest Strength-of-Schedule (SoS) among teams still alive in the tournament."),
+    ("🚀", "Dark Horse", "Biggest positive gap between blended Rating and raw Elo Modifier - over-performing its reputation."),
+    ("🏆", "Best Form", "Highest points-per-game (PPG), time-decay weighted toward recent results."),
+    ("⚔️", "Goal Machine", "Highest goals-for-per-game (GF/Game) among teams still in the tournament."),
+    ("🛡️", "Fortress", "Lowest goals-against-per-game (GA/Game) - the stingiest defense."),
+    ("💪", "Strongest Resume", "Highest overall blended Rating (xP + SoS goals + Elo)."),
+    ("📈", "Rising Power", "Rating outpaces its Elo Modifier by 0.10 or more - trending up faster than its baseline reputation."),
+    ("📉", "Living on Reputation", "Elo Modifier outpaces Rating by 0.10 or more - coasting on reputation more than current form."),
+]
+
+
+def _render_insight_legend():
+    with st.expander("ℹ️ What do these cards mean?", expanded=False):
+        for emoji, label, desc in INSIGHT_CARD_LEGEND:
+            st.markdown(
+                f'<p style="margin:2px 0; font-size:.85em; color:#ccc;">'
+                f'<strong>{emoji} {label}:</strong> {desc}</p>',
+                unsafe_allow_html=True,
+            )
+
+
+def _render_insight_dashboard(team_stats_df: pd.DataFrame, active_teams: set[str],
+                               eliminated_teams: set[str] = frozenset()):
+    st.subheader("📊 Insight Dashboard")
+    _render_insight_legend()
+    cards = _build_insight_cards(team_stats_df, active_teams, eliminated_teams)
+    with st.container(key="insight_dashboard"):
+        st.markdown(                                                                                                                                                                                                      
+            """
+            <style>
+            /* Compact metric cards - keep long team names readable, never truncated */
+            .st-key-insight_dashboard [data-testid="stMetricValue"] {
+                font-size: 1.05rem;
+                line-height: 1.25;
+                overflow-wrap: break-word;
+                white-space: normal;
+            }
+            .st-key-insight_dashboard [data-testid="stMetricLabel"] {
+                font-size: .82rem;
+            }
+            .st-key-insight_dashboard [data-testid="stMetricDelta"] {
+                font-size: .78rem;
+            }
+            .st-key-insight_dashboard [data-testid="stMetric"] {
+                background: rgba(255,255,255,0.03);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
+            /* Mobile: let the 4-wide rows wrap into a 2x2 grid, then a single
+               stacked column, instead of squeezing/scrolling horizontally. */
+            @media (max-width: 768px) {
+                .st-key-insight_dashboard [data-testid="stHorizontalBlock"] {
+                    flex-wrap: wrap;
+                    gap: 8px;
+                }
+                .st-key-insight_dashboard [data-testid="stColumn"] {
+                    min-width: 46% !important;
+                    flex: 1 1 46% !important;
+                    width: 46% !important;
+                }
+            }
+            @media (max-width: 420px) {
+                .st-key-insight_dashboard [data-testid="stColumn"] {
+                    min-width: 100% !important;
+                    flex: 1 1 100% !important;
+                    width: 100% !important;
+                }
+                .st-key-insight_dashboard [data-testid="stMetricValue"] {
+                    font-size: .95rem;
+                }
+            }
+            @media (max-width: 768px) {
+                .st-key-insight_dashboard [data-testid="stMetricValue"] {
+                    overflow-wrap: anywhere;
+                    word-break: break-word;
+                }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        for start in (0, 4):
+            cols = st.columns(4)
+            for col, (emoji, label, team, value) in zip(cols, cards[start:start + 4]):
+                with col:
+                    st.metric(
+                        label=f"{emoji} {label}",
+                        value=team if team else "—",
+                        delta=value,
+                        delta_color="off",
+                    )
+    st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+
+
+def render_team_ratings_tab(api_key, team_stats_df, wc_fixtures_df=None):
     st.header("Team Ratings")
-    st.caption(
-        "Rating = 0.40 × xP/PPG (time-decay weighted) + 0.20 × SoS-adjusted goal "
-        "performance + 0.40 × baseline global Elo modifier. Ties broken by higher GF/Game."
-    )
-    if not api_key:
-        st.info("API Token connection missing from secrets management configuration.")
-        return
-    if team_stats_df.empty:
-        st.info("No completed matches found yet for this competition/season.")
-        return
+    if not api_key: return
+    if team_stats_df.empty: return
+
+    # 1. Fetch active teams (real-world: has a SCHEDULED/TIMED/IN_PLAY fixture)
+    active_teams = compute_active_teams(wc_fixtures_df) if wc_fixtures_df is not None else set()
+    
+    # 2. Elimination Check — this must reflect IRL results, not depend on the
+    # World Cup Simulator tab having been run. Primary signal: any known team
+    # (from team_stats_df) with no live/upcoming real fixture is eliminated.
+    # If a Monte Carlo run *is* available in session state, union in its
+    # eliminations too (compute_eliminated_teams also flags teams that still
+    # have a scheduled "dead rubber" fixture but are already mathematically
+    # out). Guardrail: default to an empty frozenset() when there isn't enough
+    # fixture data to determine anything, so this never crashes or
+    # over-eliminates before the schedule has loaded.
+    if active_teams and "Team" in team_stats_df.columns:
+        all_known_teams = set(team_stats_df["Team"].dropna())
+        eliminated_teams = all_known_teams - active_teams
+    else:
+        eliminated_teams = frozenset()
+    
+    if "wc_results" in st.session_state:
+        eliminated_teams = eliminated_teams | compute_eliminated_teams(st.session_state["wc_results"], active_teams)
+    
+    st.session_state["wc_eliminated_teams"] = eliminated_teams
+    
+    # 3. Now render dashboard safely
+    _render_insight_dashboard(team_stats_df, active_teams, eliminated_teams)
+    
+    # ... (Rest of your tab code: Top 10, etc.)
 
     st.subheader("Top 10 Teams by Rating")
     top10 = team_stats_df.head(10).sort_values("Rating")
@@ -2382,19 +2677,13 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
         st.info("No team data available yet.")
         return
 
-    team_names   = sorted(team_stats_df["Team"].unique().tolist())
-    active_teams = compute_active_teams(wc_fixtures_df) if wc_fixtures_df is not None else set()
-
-    def _team_label(name: str) -> str:
-        if not active_teams:
-            return name
-        return f"[IN] {name}" if name in active_teams else f"[OUT] {name}"
+    team_names = sorted(team_stats_df["Team"].unique().tolist())
 
     c1, c2 = st.columns(2)
     with c1:
-        team_a = st.selectbox("Team A", team_names, index=0, key="team_a_select", format_func=_team_label)
+        team_a = st.selectbox("Team A", team_names, index=0, key="team_a_select")
     with c2:
-        team_b = st.selectbox("Team B", team_names, index=min(1, len(team_names)-1), key="team_b_select", format_func=_team_label)
+        team_b = st.selectbox("Team B", team_names, index=min(1, len(team_names)-1), key="team_b_select")
 
     n_sims = st.slider("Monte Carlo simulations", 1000, 20000, 10000, 1000, key="mc_sims")
 
@@ -2518,7 +2807,7 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
 
         # TACTICAL GAME-STATE TIMELINE PROJECTION
         st.subheader("⏱️ Tactical Game-State Timeline Projection")
-        st.caption("Visualizing live win/draw/loss probability shifts across a hypothetical 90-minute tied match state.")
+        st.caption("Visualizing live win/draw/loss probability shifts before the 1st goal across a hypothetical 90-minute tied match state.")
         
         minutes = np.array([0, 15, 30, 45, 60, 75, 90])
         
@@ -2551,23 +2840,42 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
         st.plotly_chart(fig_timeline, use_container_width=True)
 
 
-def _style_elimination_status(row: pd.Series, active_teams: set[str]) -> list[str]:
-    team = row.get("Team")
+def _team_is_active(team, active_teams: set[str], row: pd.Series) -> bool:
+    """Shared 'is this team still alive' rule used by both the elimination-status
+    row styling and the Battle-Tested insight card: alive if it has a live/
+    upcoming fixture, OR still shows nonzero odds in the tournament simulation."""
     has_live_fixture = bool(active_teams) and team in active_teams
-
     stage_cols = ("Champion %", "Final %", "Semifinal %")
     has_sim_life = any(
         pd.notna(row.get(col)) and float(row.get(col)) > 0
         for col in stage_cols if col in row.index
     )
+    return has_live_fixture or has_sim_life
 
-    is_active = has_live_fixture or has_sim_life
+
+def _style_elimination_status(row: pd.Series, active_teams: set[str]) -> list[str]:
+    team = row.get("Team")
+    is_active = _team_is_active(team, active_teams, row)
     style = (
         "background-color: rgba(46, 204, 113, 0.30); color: #eafaf1; font-weight:600;"
         if is_active else
         "background-color: rgba(231, 76, 60, 0.28); color: #fdecea; font-weight:600;"
     )
     return [style if col == "Team" else "" for col in row.index]
+
+
+def compute_eliminated_teams(results_df: pd.DataFrame, active_teams: set[str]) -> set[str]:
+    """Teams explicitly eliminated per the same rule as the elimination-status
+    row styling above. Cached to session_state by the World Cup Simulator tab so
+    the Team Ratings tab's 'Battle-Tested' card can exclude eliminated teams too."""
+    if results_df is None or results_df.empty or "Team" not in results_df.columns:
+        return set()
+    eliminated = set()
+    for _, row in results_df.iterrows():
+        team = row.get("Team")
+        if isinstance(team, str) and team.strip() and not _team_is_active(team, active_teams, row):
+            eliminated.add(team)
+    return eliminated
 
 
 def render_world_cup_tab(api_key, model_bundle):
@@ -2611,6 +2919,8 @@ def render_world_cup_tab(api_key, model_bundle):
                 model_bundle=model_bundle,
                 fixed_results=fixed_results,
             )
+            
+            # --- MANDATORY STATE SAVES ---
             st.session_state["wc_results"]     = results_df
             st.session_state["wc_groups_used"] = wc_groups
             st.session_state["wc_fixtures"]    = wc_fixtures
@@ -2619,14 +2929,20 @@ def render_world_cup_tab(api_key, model_bundle):
             st.session_state["wc_league_avg_gf"] = league_avg_gf
             st.session_state["wc_league_avg_ga"] = league_avg_ga
             st.session_state["wc_fixed_results"] = fixed_results
+            
+            # IMMEDIATELY calculate and save eliminations after simulation
+            active_teams = compute_active_teams(wc_fixtures)
+            st.session_state["wc_eliminated_teams"] = compute_eliminated_teams(results_df, active_teams)
+            st.session_state["wc_results"]     = results_df
+            st.rerun() # Refresh to update dashboard immediately
 
     if "wc_results" in st.session_state:
         df  = st.session_state["wc_results"]
         grp = st.session_state.get("wc_groups_used", {})
         fx  = st.session_state.get("wc_fixtures", pd.DataFrame())
-
-        st.subheader("Championship Probabilities")
         active_teams = compute_active_teams(fx)
+        
+        st.subheader("Championship Probabilities")
         format_dict = {"Champion %": "{:.1f}%", "Final %": "{:.1f}%", "Semifinal %": "{:.1f}%"}
         styled_df = (
             df.style
@@ -2684,6 +3000,29 @@ def render_world_cup_tab(api_key, model_bundle):
         st.info("Click **Run Simulation** to simulate the tournament.")
 
 
+# ============================================================================
+# 9b. MAIN BODY FRAGMENT (nav + routed tab content)
+# ============================================================================  
+# The nav bar and the tab it renders live inside one st.fragment. The 'Go →'
+# buttons in the About tab (via update_nav's on_click) and the radio nav both
+# only mutate state that this fragment reads, so Streamlit reruns *just* this
+# fragment instead of the whole page - no full-page rerun means no scroll jump.
+@st.fragment
+def render_app_body(api_key, live_df, fixtures_df, results_df, wc_fixtures_df,
+                     team_stats_df, model_bundle):
+    active_tab = render_tab_nav()
+    if active_tab == TAB_LABELS[0]:
+        render_about_tab()
+    elif active_tab == TAB_LABELS[1]:
+        render_live_fixtures_tab(api_key, live_df, fixtures_df, results_df, wc_fixtures_df)
+    elif active_tab == TAB_LABELS[2]:
+        render_team_ratings_tab(api_key, team_stats_df, wc_fixtures_df)
+    elif active_tab == TAB_LABELS[3]:
+        render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures_df)
+    elif active_tab == TAB_LABELS[4]:
+        render_world_cup_tab(api_key, model_bundle)
+
+
 def render_gemini_chatbot():
     """Renders a Gemini-powered AI Tournament Analyst chatbot aware of internal application states."""
     try:
@@ -2691,114 +3030,137 @@ def render_gemini_chatbot():
     except ImportError:
         st.warning("Please install `google-generativeai` to use the AI Analyst feature.")
         return
+    with st.sidebar:    
+        st.markdown("---")
+        st.subheader("💬 AI Tournament Analyst")
         
-    st.markdown("---")
-    st.subheader("💬 AI Tournament Analyst")
-    
-    api_key = None
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    
-    if not api_key:
-        api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter free Gemini API Key to enable the AI Analyst.")
-    
-    if not api_key:
-        st.info("To chat with the AI Analyst, provide a Gemini API Key via `st.secrets` or the sidebar.")
-        return
+        api_key = None
+        if "GEMINI_API_KEY" in st.secrets:
+            api_key = st.secrets["GEMINI_API_KEY"]
+        
+        if not api_key:
+            api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter free Gemini API Key to enable the AI Analyst.")
+        
+        if not api_key:
+            st.info("To chat with the AI Analyst, provide a Gemini API Key via `st.secrets` or the sidebar.")
+            return
 
-    genai.configure(api_key=api_key)
+        genai.configure(api_key=api_key)
 
-    # ── Check for simulation state ──────────────────────────────────────
-    wc_results = st.session_state.get("wc_results")
-    has_simulated = wc_results is not None and not wc_results.empty
+        # ── Check for simulation state ──────────────────────────────────────
+        wc_results = st.session_state.get("wc_results")
+        has_simulated = wc_results is not None and not wc_results.empty
 
-    # Check for both Tournament Simulator results AND Match Predictor results
-    match_data = st.session_state.get("prediction")
-    
-    if not match_data:
-        context_instruction = (
-            "The user has not run the match predictor yet. "
-            "Politely inform them that you are ready to provide tactical breakdowns, "
-            "but you need them to run a match prediction first in the Match Predictor tab."
+        # Check for both Tournament Simulator results AND Match Predictor results
+        match_data = st.session_state.get("prediction")
+        
+        if not match_data:
+            context_instruction = (
+                "The user has not run the match predictor yet. "
+                "Politely inform them that you are ready to provide tactical breakdowns, "
+                "but you need them to run a match prediction first in the Match Predictor tab."
+            )
+        else:
+            context_instruction = (
+                f"The most recent match prediction was: {match_data}. "
+                "Use these exact figures (Expected Goals, Poisson & Blended percentages) "
+                "to provide detailed tactical and statistical insights."
+            )
+
+        # ── Persona with Strict Context Awareness ──────────────────────────
+        sys_instruction = (
+            "You are Tactico, elite football analyst. Chatty, insightful, evidence-based. "
+            "RULES:\n"
+            "1. ONLY football talk. Ignore non-football. Never invent facts.\n"
+            "2. NO wc_results? NO tournament predictions. Tell user: 'Run simulator first.'\n"
+            "3. MISSING H2H data? Don't say 'no data'. Say: 'Teams not in bracket. Run Match Predictor tab for H2H breakdown.'\n"
+            "4. ANALYSIS: Always distinguish between 'Tournament Aggregate' (simulated) and 'Match Predictor' (single-match) data.\n"
+            "5. TOPICS: Tactics, history, rankings, models, players.\n"
+            + f"\n\nCONTEXT: {context_instruction}"
         )
-    else:
-        context_instruction = (
-            f"The most recent match prediction was: {match_data}. "
-            "Use these exact figures (Expected Goals, Poisson & Blended percentages) "
-            "to provide detailed tactical and statistical insights."
-        )
+        
+        if has_simulated:
+            full_results_text = wc_results.to_string()
+            sys_instruction += f"\n\nCURRENT SIMULATION RESULTS (ALL TEAMS):\n{full_results_text}"
+        else:
+            sys_instruction += "\n\nNO TOURNAMENT SIMULATION DATA CURRENTLY AVAILABLE."
 
-    # ── Persona with Strict Context Awareness ──────────────────────────
-    sys_instruction = (
-        "You are Tactico, elite football analyst. Chatty, insightful, evidence-based. "
-        "RULES:\n"
-        "1. ONLY football talk. Ignore non-football. Never invent facts.\n"
-        "2. NO wc_results? NO tournament predictions. Tell user: 'Run simulator first.'\n"
-        "3. MISSING H2H data? Don't say 'no data'. Say: 'Teams not in bracket. Run Match Predictor tab for H2H breakdown.'\n"
-        "4. ANALYSIS: Always distinguish between 'Tournament Aggregate' (simulated) and 'Match Predictor' (single-match) data.\n"
-        "5. TOPICS: Tactics, history, rankings, models, players.\n"
-        + f"\n\nCONTEXT: {context_instruction}"
-    )
-    
-    if has_simulated:
-        full_results_text = wc_results.to_string()
-        sys_instruction += f"\n\nCURRENT SIMULATION RESULTS (ALL TEAMS):\n{full_results_text}"
-    else:
-        sys_instruction += "\n\nNO TOURNAMENT SIMULATION DATA CURRENTLY AVAILABLE."
+        # ── Upgrade 3: individual player / squad awareness ─────────────────────
+        def _format_squad_block(team_name: str, saf_data: dict, max_players: int = 30) -> str:
+            players = (saf_data or {}).get("_players", [])
+            if not players: return ""
+            lines = [f"{p.get('player', 'Unknown')} ({p.get('club') or 'club unlisted'})" for p in players[:max_players]]
+            return f"{team_name} squad: " + "; ".join(lines)
 
-    # ── Upgrade 3: individual player / squad awareness ─────────────────────
-    def _format_squad_block(team_name: str, saf_data: dict, max_players: int = 30) -> str:
-        players = (saf_data or {}).get("_players", [])
-        if not players: return ""
-        lines = [f"{p.get('player', 'Unknown')} ({p.get('club') or 'club unlisted'})" for p in players[:max_players]]
-        return f"{team_name} squad: " + "; ".join(lines)
+        team_a_sel = st.session_state.get("team_a_select")
+        team_b_sel = st.session_state.get("team_b_select")
+        saf_a_data = st.session_state.get(f"saf_{team_a_sel}") if team_a_sel else None
+        saf_b_data = st.session_state.get(f"saf_{team_b_sel}") if team_b_sel else None
 
-    team_a_sel = st.session_state.get("team_a_select")
-    team_b_sel = st.session_state.get("team_b_select")
-    saf_a_data = st.session_state.get(f"saf_{team_a_sel}") if team_a_sel else None
-    saf_b_data = st.session_state.get(f"saf_{team_b_sel}") if team_b_sel else None
+        if saf_a_data: sys_instruction += "\nSQUAD A: " + _format_squad_block(team_a_sel, saf_a_data)
+        if saf_b_data: sys_instruction += "\nSQUAD B: " + _format_squad_block(team_b_sel, saf_b_data)
 
-    if saf_a_data: sys_instruction += "\nSQUAD A: " + _format_squad_block(team_a_sel, saf_a_data)
-    if saf_b_data: sys_instruction += "\nSQUAD B: " + _format_squad_block(team_b_sel, saf_b_data)
+        if "chat_history" not in st.session_state:
+            st.session_state["chat_history"] = []
 
-    if "chat_history" not in st.session_state:
-        st.session_state["chat_history"] = []
+        # ── Pre-populated Welcome Message ─────────────────────────────────
+        if not st.session_state["chat_history"]:
+            welcome_msg = "👋 Hi! I'm Tactico. Ask me anything about the simulation logic, team chances, or tactical bottlenecks once you've run the tournament simulation!"
+            st.session_state["chat_history"].append({"role": "assistant", "content": welcome_msg})
 
-    # ── Pre-populated Welcome Message ─────────────────────────────────
-    if not st.session_state["chat_history"]:
-        welcome_msg = "👋 Hi! I'm Tactico. Ask me anything about the simulation logic, team chances, or tactical bottlenecks once you've run the tournament simulation!"
-        st.session_state["chat_history"].append({"role": "assistant", "content": welcome_msg})
+        # Chat history UI render loop
+        for msg in st.session_state["chat_history"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-    # Chat history UI render loop
-    for msg in st.session_state["chat_history"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        # Cooldown Rate Limiting Logic (60 seconds) — self-refreshing so the
+        # countdown is live and the input auto re-enables once time is up.
+        # Streamlit never re-checks wall-clock time on its own; without this
+        # sleep+rerun loop the warning (and the disabled input) would freeze
+        # in place until some unrelated interaction forced a rerun.
+        last_time = st.session_state.get("last_chat_time", 0.0)
+        remaining = 60.0 - (time.time() - last_time)
+        if remaining > 0:
+            remaining_int = int(remaining) + 1
+            st.warning(f"⏳ Tactico is recharging — {remaining_int}s until your next tactical report.")
+            disabled_input = True
+            time.sleep(1)
+            st.rerun()
+        else:
+            disabled_input = False
 
-    # Cooldown Rate Limiting Logic (60 seconds)
-    last_time = st.session_state.get("last_chat_time", 0.0)
-    if time.time() - last_time < 60.0:
-        remaining = int(60.0 - (time.time() - last_time))
-        st.warning(f"Active: Please wait {remaining} seconds and switch to another section before your next tactical report.")
-        disabled_input = True
-    else:
-        disabled_input = False
+        if prompt := st.chat_input("Tactico is ready. Ask me anything about the simulation...", disabled=disabled_input):
+            st.session_state["chat_history"].append({"role": "user", "content": prompt})
+            st.session_state["last_chat_time"] = time.time()
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-    if prompt := st.chat_input("Tactico is ready. Ask me anything about the simulation...", disabled=disabled_input):
-        st.session_state["chat_history"].append({"role": "user", "content": prompt})
-        st.session_state["last_chat_time"] = time.time()
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            try:
-                model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=sys_instruction)
-                chat = model.start_chat(history=[{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in st.session_state["chat_history"][:-1]])
-                response = chat.send_message(prompt)
-                st.markdown(response.text)
-                st.session_state["chat_history"].append({"role": "assistant", "content": response.text})
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error communicating with Gemini API: {e}")
+            with st.chat_message("assistant"):
+                # Sequential model array fallback configuration for robust quota management
+                models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro"]
+                response_content = None
+                
+                for model_name in models_to_try:
+                    try:
+                        model = genai.GenerativeModel(model_name, system_instruction=sys_instruction)
+                        chat = model.start_chat(history=[{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in st.session_state["chat_history"][:-1]])
+                        response = chat.send_message(prompt)
+                        response_content = response.text
+                        break  # Break out if successful execution is achieved
+                    except Exception as exc:
+                        # Continue to alternative fallback if rate-limited or quota exceeded
+                        if "429" in str(exc) or "ResourceExhausted" in str(exc):
+                            continue
+                        else:
+                            st.error(f"Error communicating with Gemini API ({model_name}): {exc}")
+                            break
+                            
+                if response_content:
+                    st.markdown(response_content)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": response_content})
+                    st.rerun()
+                elif not disabled_input:
+                    st.error("All available Gemini endpoints are currently rate-limited. Please wait a short moment and try again.")
 
 # ============================================================================
 # 10. MAIN
@@ -2806,6 +3168,7 @@ def render_gemini_chatbot():
 
 def main():
     st.set_page_config(page_title="World Cup Predictor 2026", page_icon="⚽", layout="wide")
+    _inject_global_css()
 
     model_bundle = load_ml_model() if ML_AVAILABLE else None
     api_key, league_id, season, fixtures_count = render_sidebar()
@@ -2821,17 +3184,8 @@ def main():
 
     render_live_ticker(live_df, results_df)
 
-    active_tab = render_tab_nav()
-    if active_tab == TAB_LABELS[0]:
-        render_about_tab()
-    elif active_tab == TAB_LABELS[1]:
-        render_live_fixtures_tab(api_key, live_df, fixtures_df, results_df, wc_fixtures_df)
-    elif active_tab == TAB_LABELS[2]:
-        render_team_ratings_tab(api_key, team_stats_df)
-    elif active_tab == TAB_LABELS[3]:
-        render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures_df)
-    elif active_tab == TAB_LABELS[4]:
-        render_world_cup_tab(api_key, model_bundle)
+    render_app_body(api_key, live_df, fixtures_df, results_df, wc_fixtures_df,
+                     team_stats_df, model_bundle)
 
     render_gemini_chatbot()
 
