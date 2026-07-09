@@ -2328,7 +2328,7 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
             ticker_str = f"⚽ {home} {score} {away}"
             
             if is_draw:
-                ticker_str = f'<span style="color:#e74c3c !important; font-weight:700;">{ticker_str}</span>'
+                ticker_str = f'<span class="ticker-red">{ticker_str}</span>'
             elif winner:  # Removed strict "and rankings" requirement check
                 home_elo = _lookup_elo_rating(home, rankings) if rankings else 1500
                 away_elo = _lookup_elo_rating(away, rankings) if rankings else 1500
@@ -2338,11 +2338,11 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
                 favorite = home if home_elo >= away_elo else away
                 underdog = away if home_elo >= away_elo else home
                 
-                # Use your canonical string keys to prevent name mismatch drops
-                if _team_key(winner) == _team_key(favorite):
-                    ticker_str = f'<span style="color:#2ecc71 !important; font-weight:700;">{ticker_str}</span>'
+
+               if _team_key(winner) == _team_key(favorite):
+                    ticker_str = f'<span class="ticker-green">{ticker_str}</span>'
                 elif _team_key(winner) == _team_key(underdog):
-                    ticker_str = f'<span style="color:#e74c3c !important; font-weight:700;">{ticker_str}</span>'
+                    ticker_str = f'<span class="ticker-red">{ticker_str}</span>'
 
             items.append(ticker_str)
 
@@ -2371,7 +2371,10 @@ def render_live_ticker(live_df: pd.DataFrame, results_df: pd.DataFrame):
         </div>
     </div>
     <style>
-    /* Ensure the wrapper does not trigger browser-level scroll behavior */
+    /* Add your new classes here */
+    .ticker-red {{ color: #e74c3c !important; font-weight: 700; }}
+    .ticker-green {{ color: #2ecc71 !important; font-weight: 700; }}
+    
     .wc-ticker-wrapper {{ 
         display: block; 
         max-width: 100%; 
