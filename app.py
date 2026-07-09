@@ -2339,10 +2339,10 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
                 underdog = away if home_elo >= away_elo else home
                 
 
-               if _team_key(winner) == _team_key(favorite):
-                    ticker_str = f'<span class="ticker-green">{ticker_str}</span>'
-                elif _team_key(winner) == _team_key(underdog):
-                    ticker_str = f'<span class="ticker-red">{ticker_str}</span>'
+            if _team_key(winner) == _team_key(favorite):
+               ticker_str = f'<span class="ticker-green">{ticker_str}</span>'
+            elif _team_key(winner) == _team_key(underdog):
+               ticker_str = f'<span class="ticker-red">{ticker_str}</span>'
 
             items.append(ticker_str)
 
