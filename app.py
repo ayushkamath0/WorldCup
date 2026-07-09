@@ -2310,7 +2310,6 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
             home = row.get("Home", "")
             away = row.get("Away", "")
             
-            # --- FIXED: Use your display helper to grab the penalty-inclusive scoreline ---
             home_score, away_score = _fixture_score(row)
             if home_score and away_score:
                 score = f"{home_score} - {away_score}"
@@ -2319,8 +2318,6 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
                 
             winner = _fixture_winner(row)
             
-            # Classify draws versus definitive outcomes for marquee color flashes
-            # If the base goals are equal, it counts as a match draw (even if a shootout settled progression)
             hg = row.get("Home Goals")
             ag = row.get("Away Goals")
             try:
@@ -2331,22 +2328,25 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
             ticker_str = f"⚽ {home} {score} {away}"
             
             if is_draw:
-                ticker_str = f'<span style="color:#e74c3c;">{ticker_str}</span>'
-            elif winner and rankings:
-                home_elo = _lookup_elo_rating(home, rankings) or 1500
-                away_elo = _lookup_elo_rating(away, rankings) or 1500
+                ticker_str = f'<span style="color:#e74c3c !important; font-weight:700;">{ticker_str}</span>'
+            elif winner:  # Removed strict "and rankings" requirement check
+                home_elo = _lookup_elo_rating(home, rankings) if rankings else 1500
+                away_elo = _lookup_elo_rating(away, rankings) if rankings else 1500
+                home_elo = home_elo or 1500
+                away_elo = away_elo or 1500
+                
                 favorite = home if home_elo >= away_elo else away
                 underdog = away if home_elo >= away_elo else home
                 
-                if winner == favorite:
-                    ticker_str = f'<span style="color:#2ecc71;">{ticker_str}</span>'
-                elif winner == underdog:
-                    ticker_str = f'<span style="color:#e74c3c;">{ticker_str}</span>'
+                # Use your canonical string keys to prevent name mismatch drops
+                if _team_key(winner) == _team_key(favorite):
+                    ticker_str = f'<span style="color:#2ecc71 !important; font-weight:700;">{ticker_str}</span>'
+                elif _team_key(winner) == _team_key(underdog):
+                    ticker_str = f'<span style="color:#e74c3c !important; font-weight:700;">{ticker_str}</span>'
 
             items.append(ticker_str)
 
     return items[:max_items]
-
 
 # ─── 8d. LIVE TICKER RENDERING ENGINE ───────────────────────────────────────
 def render_live_ticker(live_df: pd.DataFrame, results_df: pd.DataFrame):
