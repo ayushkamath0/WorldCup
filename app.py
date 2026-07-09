@@ -1,3 +1,34 @@
+"""
+Streamlit Soccer Analytics & Predictive Forecasting Application (World Cup 2026)
+
+Architecture & Data Flow Topology:
+──────────────────────────────────────────────────────────────────────────────
+1. Ingestion Layer (External APIs & Scrapers):
+   - Football-Data.org API v4: Serves as the primary real-time and scheduled scheduling/results
+     backbone, delivering live match state, scores, and official tournament group brackets.
+   - Live/Archival ETL Scraping Pipelines: Targeted scrapers parse detailed team and player attributes:
+     * eloratings.net -> Real-time international Elo ratings used for baseline metrics.
+     * FBref -> Squad match logs, tactical formation variance counters, and player tracking.
+     * Transfermarkt -> Injury availability metrics, squad depth, and international caps/experience.
+     * Club Elo -> Regional league coefficients and domestic tier weights.
+
+2. Predictive & Simulation Engine Layer:
+   - Vectorized Poisson Model: Evaluates independent attacking and defensive coefficients derived from 
+     historical goal-scoring distributions to build a baseline discrete score probability matrix.
+   - XGBoost Classifier Calibration Blend: An extreme gradient-boosted tree model trained on synthetic
+     distributions calibrations. It accepts rating differentials, squad-attribute adjustments, and
+     vectorized Poisson outcomes to output calibrated 3-way match probabilities (Home, Draw, Away).
+   - Monte Carlo Tournament Tree Simulator: Evaluates tournament state over thousands of iterations, 
+     accounting for locked real-world fixture overrides and tie-breaker progressions.
+
+3. Presentation Layer:
+   - Streamlit Multi-tab Reactive Framework: Managed via session-state routing keys combined with 
+     fragment-isolated caching boundaries to minimize redundant network and computational overhead.
+
+Author: Ayush Kamath
+Copyright: © 2026 Ayush Kamath. All Rights Reserved.
+"""
+
 # ============================================================================
 # 1. IMPORTS
 # ============================================================================
@@ -19,6 +50,8 @@ import requests
 from bs4 import BeautifulSoup
 from scipy.stats import poisson
 import streamlit as st
+import streamlit.components.v1 as components
+
 
 # ─── ML / model persistence ─────────────────────────────────────────────────
 try:
@@ -58,9 +91,9 @@ TAB_LABELS = [
 ]
 
 # ─── Expert-level team rating architecture ──────────────────────────────────
-RATING_BLEND_WEIGHTS = {"xp": 0.40, "sos_goals": 0.20, "elo": 0.40}
+RATING_BLEND_WEIGHTS = {"xp": 0.25, "sos_goals": 0.15, "elo": 0.60}
 GOAL_PERFORMANCE_EXPONENT = 1.7
-TIME_DECAY_RATE = 1.5
+TIME_DECAY_RATE = 0.65
 
 # ─── Dynamic global rankings (eloratings.net) ───────────────────────────────
 ELO_WORLD_TSV_URL = "https://www.eloratings.net/World.tsv"
@@ -260,21 +293,39 @@ def blended_probs(xg_home: float, xg_away: float,
 # 4. LOW-LEVEL API HELPERS
 # ============================================================================
 
-def api_request(endpoint: str, api_key: str, params: dict = None) -> dict:
+def api_request(endpoint: str, api_key: str, params: dict = None, max_retries: int = 2) -> dict:
     if not api_key:
         return {}
     url     = f"{API_BASE_URL}/{endpoint}"
     headers = {"X-Auth-Token": api_key}
-    try:
-        r = requests.get(url, headers=headers, params=params or {}, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.Timeout:
-        st.error("Request timed out. Please try again.")
-        return {}
-    except requests.exceptions.ConnectionError:
-        st.error("Could not connect to Football-Data.org.")
-        return {}
-    except requests.exceptions.RequestException as exc:
-        st.error(f"Network error: {exc}")
+
+    # Transient network blips (a dropped handshake, a slow DNS lookup, one
+    # lost packet) shouldn't surface as a user-facing error on the first
+    # failure — retry a couple of times with a short backoff before giving up.
+    r = None
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params or {}, timeout=REQUEST_TIMEOUT)
+            last_exc = None
+            break
+        except requests.exceptions.Timeout as exc:
+            last_exc = ("timeout", exc)
+        except requests.exceptions.ConnectionError as exc:
+            last_exc = ("connection", exc)
+        except requests.exceptions.RequestException as exc:
+            # Not a transient blip (e.g. malformed URL) — no point retrying.
+            st.error(f"Network error: {exc}")
+            return {}
+        if attempt < max_retries:
+            time.sleep(0.5 * (attempt + 1))
+
+    if last_exc is not None:
+        kind, exc = last_exc
+        if kind == "timeout":
+            st.error("Request timed out. Please try again.")
+        else:
+            st.error("Could not connect to Football-Data.org.")
         return {}
 
     if r.status_code in (401, 403):
@@ -307,10 +358,39 @@ def check_api_key(api_key: str):
     return True, "Connected to Football-Data.org successfully!"
 
 
+def _regulation_score(score_obj: dict | None) -> tuple[int | None, int | None]:
+    """
+    Extract "goals for" from a football-data.org v4 `score` node, guaranteed to
+    EXCLUDE penalty shootout goals.
+
+    football-data.org v4 score object shape:
+        {
+          "winner":    "HOME_TEAM" | "AWAY_TEAM" | "DRAW" | None,
+          "duration":  "REGULAR" | "EXTRA_TIME" | "PENALTY_SHOOTOUT",
+          "fullTime":  {"home": int, "away": int},   # final goals - EXCLUDES penalties
+          "halfTime":  {"home": int, "away": int},
+          "extraTime": {"home": int, "away": int},   # goals scored *within* ET only
+          "penalties": {"home": int, "away": int},   # shootout goals - NEVER "goals for"
+        }
+
+    `fullTime` is the cumulative score at the end of play (90 min, or 120 min if
+    extra time was needed) and by API design never includes penalty-shootout
+    goals - those only ever live under the separate `penalties` node. Every
+    stat in this app (GF/Game, GA/Game, Attack/Defense, etc.) should read goals
+    through this helper rather than touching `score` directly, so a shootout
+    can never inflate a team's goals-for tally.
+    """
+    reg = score_obj.get("regularTime")
+    if reg and reg.get("home") is not None:
+        return reg.get("home"), reg.get("away")
+        
+    ft = score_obj.get("fullTime") or {}
+    return ft.get("home"), ft.get("away")
+
+
 def _safe_score(score_dict: dict, side: str) -> str:
-    if not score_dict or "fullTime" not in score_dict:
-        return "-"
-    v = score_dict["fullTime"].get(side)
+    home, away = _regulation_score(score_dict)
+    v = home if side == "home" else away
     return str(v) if v is not None else "-"
 
 
@@ -374,7 +454,8 @@ def get_results(api_key, league_id, season, last_n=15) -> pd.DataFrame:
         ht    = item.get("homeTeam")    or {}
         at    = item.get("awayTeam")    or {}
         score = item.get("score")       or {}
-        ft    = score.get("fullTime")   or {}
+        hg, ag = _regulation_score(score)
+        pen = score.get("penalties") or {}
         rows.append({
             "Match ID":   item.get("id"),
             "Date":       (item.get("utcDate") or "")[:10],
@@ -384,10 +465,13 @@ def get_results(api_key, league_id, season, last_n=15) -> pd.DataFrame:
             "Home":       ht.get("name", ""),
             "Score":      f"{_safe_score(score,'home')} - {_safe_score(score,'away')}",
             "Away":       at.get("name", ""),
-            "Home Goals": ft.get("home"),
-            "Away Goals": ft.get("away"),
+            "Home Goals": hg,
+            "Away Goals": ag,
             "Winner":     score.get("winner"),
             "Status":     item.get("status", "FINISHED"),
+            "Penalties Home": pen.get("home"),
+            "Penalties Away": pen.get("away"),
+            "Raw Score":  score,
         })
     return pd.DataFrame(rows)
 
@@ -403,7 +487,7 @@ def get_live_fixtures(api_key, league_id=None) -> pd.DataFrame:
         ht    = item.get("homeTeam") or {}
         at    = item.get("awayTeam") or {}
         score = item.get("score")       or {}
-        ft    = score.get("fullTime")   or {}
+        hg, ag = _regulation_score(score)
         rows.append({
             "Match ID":   item.get("id"),
             "League":     comp.get("name", ""),
@@ -413,10 +497,11 @@ def get_live_fixtures(api_key, league_id=None) -> pd.DataFrame:
             "Home":       ht.get("name", ""),
             "Away":       at.get("name", ""),
             "Score":      f"{_safe_score(score,'home')} - {_safe_score(score,'away')}",
-            "Home Goals": ft.get("home"),
-            "Away Goals": ft.get("away"),
+            "Home Goals": hg,
+            "Away Goals": ag,
             "Winner":     score.get("winner"),
             "Status":     item.get("status", "IN_PLAY"),
+            "Raw Score":  score,
         })
     return pd.DataFrame(rows)
 
@@ -539,8 +624,8 @@ def get_team_stats(api_key, league_id, season) -> pd.DataFrame:
         if item.get("status") != "FINISHED":
             continue
 
-        sc = item.get("score") or {};  ft = sc.get("fullTime") or {}
-        hg, ag = ft.get("home"), ft.get("away")
+        sc = item.get("score") or {}
+        hg, ag = _regulation_score(sc)
         if None in (hn, an, hg, ag):
             continue
 
@@ -597,20 +682,37 @@ def get_team_stats(api_key, league_id, season) -> pd.DataFrame:
 
             weighted_points += w * match_pts
 
+            # RECTIFIED BELIEVABLE LOGIC:
             opp_elo = _lookup_elo_rating(m["opp"], rankings)
             if opp_elo is None:
                 opp_elo = global_avg_elo if global_avg_elo is not None else 1500.0
 
-            strength_mult = 1.0 + math.log(opp_elo / global_avg_elo) if global_avg_elo else 1.0
-            strength_mult = max(min(strength_mult, 1.5), 0.75)
-
+            # Accumulate the weighted opponent Elo so sos_elo below is never
+            # a 0.0/0.0 division — this is what was missing before.
             weighted_opp_elo   += w * opp_elo
             opp_elo_weight_sum += w
 
-            sos_weighted_gf += w * gf_eff * strength_mult
-            sos_weighted_ga += w * (ga_eff / strength_mult)
+            # 1. DAMPEN THE SoS EFFECT: Only refine the stats, do not overwrite them
+            if global_avg_elo and global_avg_elo > 0:
+                strength_mult = 1.0 + 0.35 * math.log(opp_elo / global_avg_elo)
+            else:
+                strength_mult = 1.0
 
-            running_group_pts += match_pts
+            # Tighten the bounds so stats can never be distorted by more than 15%
+            strength_mult = max(min(strength_mult, 1.15), 0.85)
+
+            # 2. STRIP PENALTIES FOR CALCULATIONS: Ensure we only parse numeric regulation/ET goals
+            try:
+                gf_eff = float(m["gf"])
+                ga_eff = float(m["ga"])
+            except ValueError:
+                # If a string like '2 (4)' somehow slipped in, extract just the base score
+                gf_eff = float(str(m["gf"]).split()[0])
+                ga_eff = float(str(m["ga"]).split()[0])
+
+            sos_weighted_gf += w * (gf_eff * strength_mult)
+            sos_weighted_ga += w * (ga_eff / strength_mult)
+            total_w += w
 
         ppg_norm = weighted_points / (3.0 * total_w)
         sos_elo  = weighted_opp_elo / opp_elo_weight_sum if opp_elo_weight_sum else None
@@ -655,7 +757,8 @@ def get_world_cup_matches(api_key, season, league_id=WORLD_CUP_LEAGUE_ID) -> pd.
     rows = []
     for item in raw:
         ht = item.get("homeTeam") or {}; at = item.get("awayTeam") or {}
-        sc = item.get("score")    or {}; ft = sc.get("fullTime")   or {}
+        sc = item.get("score")    or {}
+        hg, ag = _regulation_score(sc)
         rows.append({
             "Match ID":   item.get("id"),
             "Date":       (item.get("utcDate") or "")[:16].replace("T", " "),
@@ -664,10 +767,11 @@ def get_world_cup_matches(api_key, season, league_id=WORLD_CUP_LEAGUE_ID) -> pd.
             "Stage":      item.get("stage", "") or "",
             "Home":       ht.get("name", ""),
             "Away":       at.get("name", ""),
-            "Home Goals": ft.get("home"),
-            "Away Goals": ft.get("away"),
+            "Home Goals": hg,
+            "Away Goals": ag,
             "Winner":     sc.get("winner"),
             "Status":     item.get("status", ""),
+            "Raw Score":  sc,
         })
     return pd.DataFrame(rows)
 
@@ -875,20 +979,34 @@ def fetch_team_saf(team_name: str) -> dict:
 
 
 def render_saf_breakdown_card(team_name: str, saf_data: dict):
+    # NOTE: `composite` is computed upstream from ALL FIVE underlying factors
+    # (tactical, form, fitness, league, experience) — that math is completely
+    # untouched. Only the *visible* rows are restricted here; Tactical Fit,
+    # Club Form, and League Strength still feed the composite score, they're
+    # just no longer rendered as individual rows to the end-user.
     composite = saf_data.get("composite", 0.80)
+
     source_map = {
-        "tactical":   ("", "Tactical Fit", "FBref - formation & lineup stability"),
-        "form":       ("", "Club Form", "FBref - last-10 match xG & results"),
         "fitness":    ("", "Fitness / Injuries", "Transfermarkt - injury availability"),
-        "league":     ("", "League Strength", "Club Elo - squad-club Elo ratings"),
         "experience": ("", "Intl. Experience", "Transfermarkt - avg squad caps"),
     }
+
+    st.markdown(f"**{team_name}**", unsafe_allow_html=True)
+
+    # Composite SAF progress bar (replaces the old static badge with a
+    # visual bar consistent with the per-factor rows below it)
+    comp_pct   = int(composite * 100)
+    comp_color = "#2ecc71" if composite >= 0.85 else ("#f39c12" if composite >= 0.70 else "#e74c3c")
     st.markdown(
-        f"**{team_name}** &nbsp;&nbsp;"
-        f"<span style='background:#1f4e79;color:white;padding:2px 8px;"
-        f"border-radius:4px;font-weight:bold;'>SAF {composite:.3f}</span>",
+        f'<div style="margin:6px 0 12px 0;">'
+        f'<div style="display:flex;align-items:center;gap:8px;">'
+        f'<span style="font-size:.85em;width:160px;color:#ccc;font-weight:700;">Composite SAF</span>'
+        f'<div style="flex:1;background:#2a2a2a;border-radius:4px;height:12px;">'
+        f'<div style="width:{comp_pct}%;background:{comp_color};border-radius:4px;height:12px;"></div></div>'
+        f'<span style="font-size:.85em;width:40px;text-align:right;font-weight:700;">{composite:.2f}</span></div></div>',
         unsafe_allow_html=True,
     )
+
     for key, (icon, label, source) in source_map.items():
         val   = saf_data.get(key, 0.80)
         pct   = int(val * 100)
@@ -916,13 +1034,11 @@ def calculate_expected_goals(team_a_stats, team_b_stats,
                               home_advantage: float = 1.10,
                               saf_a: float = 0.85, saf_b: float = 0.85,
                               team_a_name: str = None, team_b_name: str = None):
-    # Determine team string identity mappings to identify tournament hosts natively
     ta_name = team_a_name or (team_a_stats.get("Team") if isinstance(team_a_stats, (dict, pd.Series)) else None)
     tb_name = team_b_name or (team_b_stats.get("Team") if isinstance(team_b_stats, (dict, pd.Series)) else None)
     
     hosts = {"USA", "Mexico", "Canada", "United States"}
     
-    # HOST-NATION CALIBRATION: Neutral site by default unless matching against a certified 2026 host country
     calibrated_advantage = 1.00
     if ta_name in hosts and tb_name not in hosts:
         calibrated_advantage = 1.10
@@ -931,12 +1047,17 @@ def calculate_expected_goals(team_a_stats, team_b_stats,
         
     lgf = league_avg_gf or 1.3;  lga = league_avg_ga or 1.3
     ma  = saf_a / 0.85;          mb  = saf_b / 0.85
+    
     a_atk = (team_a_stats["GF/Game"] * ma) / lgf
-    a_def = (team_a_stats["GA/Game"] / ma) / lga
     b_atk = (team_b_stats["GF/Game"] * mb) / lgf
-    b_def = (team_b_stats["GA/Game"] / mb) / lga
-    xg_h = float(np.clip(a_atk * b_def * lgf * calibrated_advantage,       0.1, 6.0))
-    xg_a = float(np.clip(b_atk * a_def * lga * (2 - calibrated_advantage), 0.1, 6.0))
+    
+    # Defensive Floor Check: Prevent GA/Game from suppressing attack too heavily
+    a_def = (max(team_a_stats["GA/Game"], 0.6) / ma) / lga
+    b_def = (max(team_b_stats["GA/Game"], 0.6) / mb) / lga
+    
+    xg_h = float(np.clip(a_atk * b_def * lgf * calibrated_advantage, 0.1, 5.0))
+    xg_a = float(np.clip(b_atk * a_def * lga * (2 - calibrated_advantage), 0.1, 5.0))
+    
     return xg_h, xg_a
 
 
@@ -996,8 +1117,9 @@ def simulate_match_winner(team_a, team_b, ratings_lookup, lgf, lga,
     if r < hw:
         return team_a
     if r < hw + dr:
-        ra_ = sa.get("Rating", 0.5) * (saf_a / 0.85)
-        rb_ = sb.get("Rating", 0.5) * (saf_b / 0.85)
+        # Standardize tie-breakers strictly to baseline Rating
+        ra_ = sa.get("Rating", 0.5)
+        rb_ = sb.get("Rating", 0.5)
         tot = ra_ + rb_
         return team_a if np.random.random() < (ra_ / tot if tot > 0 else 0.5) else team_b
     return team_b
@@ -1695,6 +1817,24 @@ def _fixture_match_ref(row: pd.Series):
 
 
 def _fixture_score(row: pd.Series) -> tuple[str, str]:
+    # 1. Prioritize the raw API dictionary if we saved it during the fetch
+    raw_score = row.get("Raw Score")
+    if isinstance(raw_score, dict) and raw_score:
+        ft = raw_score.get("fullTime") or {}
+        pen = raw_score.get("penalties") or {}
+        
+        hf = ft.get("home")
+        af = ft.get("away")
+        
+        if hf is not None and af is not None:
+            # If penalties exist, append them (e.g., "1 (3) - 1 (2)")
+            if pen and pen.get("home") is not None and pen.get("away") is not None:
+                return f"{hf} ({pen.get('home')})", f"{af} ({pen.get('away')})"
+            
+            # Otherwise return true full time (which includes Extra Time goals)
+            return str(hf), str(af)
+            
+    # 2. Fallback for hardcoded results (like _FALLBACK_KNOCKOUT_RESULTS_2026)
     hg = row.get("Home Goals")
     ag = row.get("Away Goals")
     if pd.notna(hg) and pd.notna(ag):
@@ -1702,31 +1842,35 @@ def _fixture_score(row: pd.Series) -> tuple[str, str]:
             return str(int(hg)), str(int(ag))
         except Exception:
             return str(hg), str(ag)
-    score = row.get("Score")
-    if isinstance(score, str) and "-" in score:
-        parts = re.split(r"\s*[-:]\s*", score.strip())
+            
+    # 3. Final string parsing fallback
+    score_str = row.get("Score")
+    if isinstance(score_str, str) and "-" in score_str:
+        parts = re.split(r"\s*[-:]\s*", score_str.strip())
         if len(parts) >= 2:
             return parts[0], parts[1]
+            
     return "", ""
-
 
 def _fixture_winner(row: pd.Series) -> str | None:
     if str(row.get("Status", "")).upper() != "FINISHED":
         return None
+        
+    # 1. Trust the API's direct determination of who won the match/shootout
     api_winner = str(row.get("Winner", "") or "").upper()
     if api_winner == "HOME_TEAM":
         return row.get("Home")
     if api_winner == "AWAY_TEAM":
         return row.get("Away")
+        
+    # 2. Fallback to regulation goals if Winner token is missing
     try:
         hg = float(row.get("Home Goals"))
         ag = float(row.get("Away Goals"))
+        if hg > ag: return row.get("Home")
+        if ag > hg: return row.get("Away")
     except Exception:
         return None
-    if hg > ag:
-        return row.get("Home")
-    if ag > hg:
-        return row.get("Away")
     return None
 
 
@@ -1739,6 +1883,8 @@ def _team_key(name) -> str:
         return "bosniaandherzegovina"
     if cleaned in ("congodr", "drcongo", "democraticrepublicofcongo"):
         return "drcongo"
+    if cleaned in ("caboverde", "capeverde","capeverdeislands"):
+        return "caboverde"
     return cleaned
 
 
@@ -1762,6 +1908,10 @@ def completed_results_lookup(fixtures_df: pd.DataFrame) -> dict[tuple[str, str],
         if str(row.get("Status", "")).upper() != "FINISHED":
             continue
         home, away = row.get("Home"), row.get("Away")
+
+        if str(row.get("Status", "")).upper() not in COMPLETED_FIXTURE_STATUSES:
+            continue
+
         if not _is_confirmed_team(home) or not _is_confirmed_team(away):
             continue
         winner = _fixture_winner(row)
@@ -1811,6 +1961,96 @@ def _progression_card(title: str, first: str | None, second: str | None,
     return _match_card(title, first_entry, second_entry), winner, loser
 
 
+# Manually-curated snapshot of confirmed Round-of-16 results, current as of
+# July 8, 2026. This exists purely as a fallback for when the upstream API
+# feed is lagging/incomplete (e.g. free-tier rate limits, caching, or a
+# competition's `Stage` field not being populated yet) - it is NEVER allowed
+# to override a real row that the API already returned. Once the live feed
+# reliably carries R16+ data this block is safe to delete; nothing else
+# depends on it.
+_FALLBACK_KNOCKOUT_RESULTS_2026: list[dict] = [
+    {"Home": "Morocco",     "Away": "Canada",      "Home Goals": 3, "Away Goals": 0, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "France",      "Away": "Paraguay",    "Home Goals": 1, "Away Goals": 0, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "Norway",      "Away": "Brazil",      "Home Goals": 2, "Away Goals": 1, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "England",     "Away": "Mexico",      "Home Goals": 3, "Away Goals": 2, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "Spain",       "Away": "Portugal",    "Home Goals": 1, "Away Goals": 0, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "Belgium",     "Away": "USA",         "Home Goals": 4, "Away Goals": 1, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    {"Home": "Argentina",   "Away": "Egypt",       "Home Goals": 3, "Away Goals": 2, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+    # Draw after 120 minutes; Switzerland advanced 4-3 on penalties. Goal
+    # totals reflect regulation/ET only, per the same no-penalties-in-GF rule
+    # applied everywhere else in this file (see `_regulation_score`).
+    {"Home": "Switzerland", "Away": "Colombia",    "Home Goals": 0, "Away Goals": 0, "Winner": "HOME_TEAM", "Status": "FINISHED", "Stage": "ROUND_OF_16"},
+]
+
+
+def _fixture_pair_lookup(wc_fixtures_df: pd.DataFrame) -> dict[tuple[str, str], pd.Series]:
+    """Maps every knockout-stage fixture to its team-pair key, prioritizing API data."""
+    lookup: dict[tuple[str, str], pd.Series] = {}
+    
+    # 1. First, process all real API data from the fixture feed
+    if wc_fixtures_df is not None and not wc_fixtures_df.empty:
+        knockout_stage_codes = {code for code, _ in KNOCKOUT_STAGE_ORDER}
+        for _, row in wc_fixtures_df.iterrows():
+            stage = str(row.get("Stage", "") or "").upper()
+            if stage and stage not in knockout_stage_codes:
+                continue
+            home, away = row.get("Home"), row.get("Away")
+            if not _is_confirmed_team(home) or not _is_confirmed_team(away):
+                continue
+            # Real API data takes precedence; just overwrite/set it
+            lookup[_pair_key(home, away)] = row
+
+    # 2. Only fill in gaps with fallback results if the pair isn't already known
+    for fallback_row in _FALLBACK_KNOCKOUT_RESULTS_2026:
+        key = _pair_key(fallback_row["Home"], fallback_row["Away"])
+        if key not in lookup:
+            # Cast fallback dict to a Series to maintain API-like attribute access
+            lookup[key] = pd.Series(fallback_row)
+
+    return lookup
+
+
+def _live_progression_card(title: str, first: str | None, second: str | None,
+                           fixture_pair_lookup: dict[tuple[str, str], pd.Series]
+                           ) -> tuple[dict, str | None, str | None]:
+    """Like `_progression_card`, but looks the matchup up in real fixture data
+    first. If both teams for this round are known, we check whether that
+    match has actually been played (by team pair, since R16+ don't have a
+    fixed match-ref like R32 does) and show its real score/winner. Falls back
+    to a blank-score placeholder card only when the match hasn't happened yet
+    (or isn't in the feed)."""
+    if not first or not second:
+        return _match_card(title, _blank_entry(), _blank_entry()), None, None
+
+    row = fixture_pair_lookup.get(_pair_key(first, second))
+    if row is not None:
+        home = row.get("Home", first) or first
+        away = row.get("Away", second) or second
+        
+        # Prevent inverted scores by aligning Home/Away with the Bracket progression slots
+        if _team_key(home) == _team_key(first):
+            home_score, away_score = _fixture_score(row)
+        else:
+            away_score, home_score = _fixture_score(row)
+            
+        winner = _fixture_winner(row)
+        
+        # Use _team_key to guarantee the string matches perfectly for CSS green highlights
+        is_first_winner = _team_key(winner) == _team_key(first) if winner else False
+        is_second_winner = _team_key(winner) == _team_key(second) if winner else False
+        
+        card = _match_card(
+            title,
+            _entry(first, home_score, is_first_winner),
+            _entry(second, away_score, is_second_winner),
+            status=str(row.get("Status", "")),
+        )
+        loser = second if is_first_winner else (first if is_second_winner else None)
+        return card, winner, loser
+
+    return _progression_card(title, first, second)
+
+
 def build_live_bracket_state(wc_fixtures_df: pd.DataFrame) -> dict:
     fixture_by_ref: dict[int, pd.Series] = {}
     if wc_fixtures_df is not None and not wc_fixtures_df.empty:
@@ -1821,15 +2061,76 @@ def build_live_bracket_state(wc_fixtures_df: pd.DataFrame) -> dict:
             if ref is not None:
                 fixture_by_ref[ref] = row
 
+    pair_lookup = _fixture_pair_lookup(wc_fixtures_df)
+
     left_r32, right_r32 = [], []
     left_winners, right_winners = [], []
 
+    # --- LEFT SIDE ROUND OF 32 ---
     for ref in LEFT_R32_MATCH_REFS:
         card, winner, _ = _live_r32_card(ref, fixture_by_ref)
+        # FALLBACK SAFETY: If the API missing row scenario triggers, look up by team pair defaults
+        if not winner:
+            default_home, default_away = DEFAULT_R32_TEAMS.get(ref, (None, None))
+            if default_home and default_away:
+                p_row = pair_lookup.get(_pair_key(default_home, default_away))
+                if p_row is not None:
+                    winner = _fixture_winner(p_row)
+                    
+                    # Prevent inverted scores by aligning Home/Away with the Bracket default order
+                    row_home = str(p_row.get("Home", ""))
+                    if _team_key(row_home) == _team_key(default_home):
+                        home_score, away_score = _fixture_score(p_row)
+                    else:
+                        away_score, home_score = _fixture_score(p_row)
+                        
+                    status = str(p_row.get("Status", ""))
+                    
+                    # Guarantee the string matches perfectly for the CSS green highlight
+                    is_home_winner = _team_key(winner) == _team_key(default_home) if winner else False
+                    is_away_winner = _team_key(winner) == _team_key(default_away) if winner else False
+                    
+                    card = _match_card(
+                        "R32",
+                        _entry(default_home, home_score, is_home_winner),
+                        _entry(default_away, away_score, is_away_winner),
+                        ref=ref,
+                        status=status
+                    )
         left_r32.append(card)
         left_winners.append(winner)
+
+    # --- RIGHT SIDE ROUND OF 32 ---
     for ref in RIGHT_R32_MATCH_REFS:
         card, winner, _ = _live_r32_card(ref, fixture_by_ref)
+        # FALLBACK SAFETY: If the API missing row scenario triggers, look up by team pair defaults
+        if not winner:
+            default_home, default_away = DEFAULT_R32_TEAMS.get(ref, (None, None))
+            if default_home and default_away:
+                p_row = pair_lookup.get(_pair_key(default_home, default_away))
+                if p_row is not None:
+                    winner = _fixture_winner(p_row)
+                    
+                    # Prevent inverted scores by aligning Home/Away with the Bracket default order
+                    row_home = str(p_row.get("Home", ""))
+                    if _team_key(row_home) == _team_key(default_home):
+                        home_score, away_score = _fixture_score(p_row)
+                    else:
+                        away_score, home_score = _fixture_score(p_row)
+                        
+                    status = str(p_row.get("Status", ""))
+                    
+                    # Guarantee the string matches perfectly for the CSS green highlight
+                    is_home_winner = _team_key(winner) == _team_key(default_home) if winner else False
+                    is_away_winner = _team_key(winner) == _team_key(default_away) if winner else False
+                    
+                    card = _match_card(
+                        "R32",
+                        _entry(default_home, home_score, is_home_winner),
+                        _entry(default_away, away_score, is_away_winner),
+                        ref=ref,
+                        status=status
+                    )
         right_r32.append(card)
         right_winners.append(winner)
 
@@ -1838,7 +2139,7 @@ def build_live_bracket_state(wc_fixtures_df: pd.DataFrame) -> dict:
         for idx in range(0, len(prev_winners), 2):
             a = prev_winners[idx] if idx < len(prev_winners) else None
             b = prev_winners[idx + 1] if idx + 1 < len(prev_winners) else None
-            card, winner, loser = _progression_card(title, a, b)
+            card, winner, loser = _live_progression_card(title, a, b, pair_lookup)
             cards.append(card)
             winners.append(winner)
             losers.append(loser)
@@ -1852,8 +2153,8 @@ def build_live_bracket_state(wc_fixtures_df: pd.DataFrame) -> dict:
     right_qf, right_qf_winners, _ = build_round(right_r16_winners, "QF") 
     right_sf, right_sf_winners, right_sf_losers = build_round(right_qf_winners, "SF")
     
-    final_card, final_winner, _ = _progression_card("Final", left_sf_winners[0], right_sf_winners[0])
-    third_card, _, _ = _progression_card("Third Place", left_sf_losers[0], right_sf_losers[0])
+    final_card, final_winner, _ = _live_progression_card("Final", left_sf_winners[0], right_sf_winners[0], pair_lookup)
+    third_card, _, _ = _live_progression_card("Third Place", left_sf_losers[0], right_sf_losers[0], pair_lookup)
 
     return {
         "left_r32": left_r32, "left_r16": left_r16, "left_qf": left_qf, "left_sf": left_sf,
@@ -1898,50 +2199,56 @@ def build_simulated_bracket_state(ratings_lookup: dict, lgf: float, lga: float,
         return ratings_lookup.get(team, {}).get("Rating", 0.5)
 
     def play_card(title: str, team_a: str, team_b: str, ref=None, is_r32=False) -> tuple[dict, str, str, float, float]:
+        # team_a/team_b always come in DEFAULT_R32_TEAMS[ref] structural order
+        # (see the R32 loop below) — everything here must key off _team_key()
+        # normalization rather than raw string equality, since the API's
+        # home/away/winner strings (aliases like "Bosnia & Herz.") won't
+        # always match the literal names in DEFAULT_R32_TEAMS.
         known = fixed_results.get(_pair_key(team_a, team_b))
         if known:
-            winner = known["winner"]
+            k_team_a = _team_key(team_a)
+            k_winner = _team_key(known.get("winner"))
+            k_home = _team_key(known.get("home"))
+
+            winner = team_a if k_winner == k_team_a else team_b
             loser = team_b if winner == team_a else team_a
             win_pct, lose_pct = 100.0, 0.0
-            score_a = known.get("home_score", "") if known.get("home") == team_a else known.get("away_score", "")
-            score_b = known.get("away_score", "") if known.get("home") == team_a else known.get("home_score", "")
+
+            # Align scores to team_a/team_b's structural position, not
+            # whatever order the API happened to report home/away in.
+            if k_home == k_team_a:
+                score_a = known.get("home_score", "")
+                score_b = known.get("away_score", "")
+            else:
+                score_a = known.get("away_score", "")
+                score_b = known.get("home_score", "")
         else:
             calc_winner, calc_win_pct, calc_loser, calc_lose_pct = _pair_probability(
                 team_a, team_b, ratings_lookup, lgf, lga, saf_lookup, model_bundle
             )
-            
+
+            # --- Always trust the direct head-to-head outcome ---
+            winner = calc_winner
+            loser = calc_loser
             prob_a = calc_win_pct if team_a == calc_winner else calc_lose_pct
             prob_b = calc_lose_pct if team_a == calc_winner else calc_win_pct
-            
-            # Determine who advances based on historical metric weight vs raw match prediction
-            if is_r32 or not mc_probs:
-                winner = calc_winner
-                loser = calc_loser
-                prob_a = calc_win_pct if team_a == calc_winner else calc_lose_pct
-                prob_b = calc_lose_pct if team_a == calc_winner else calc_win_pct
-            else:
-                metric_a = get_advancement_metric(team_a)
-                metric_b = get_advancement_metric(team_b)
-                winner = team_a if metric_a >= metric_b else team_b
-                loser = team_b if winner == team_a else team_a
-                
-                # Dynamic adjustment: ensure the team advancing gets the dominant percentage 
-                # representation to prevent a visual mismatch on the bracket layout canvas
-                higher_pct = max(calc_win_pct, calc_lose_pct)
-                lower_pct = min(calc_win_pct, calc_lose_pct)
-                
-                prob_a = higher_pct if team_a == winner else lower_pct
-                prob_b = higher_pct if team_b == winner else lower_pct
 
             score_a = f"{prob_a:.0f}%"
             score_b = f"{prob_b:.0f}%"
             win_pct = prob_a if team_a == winner else prob_b
             lose_pct = prob_b if team_a == winner else prob_a
 
+        # Normalized winner comparison so the green "winner" style reliably
+        # applies even when `winner` came back as an aliased/differently
+        # cased string from the fixed-results lookup.
+        k_team_a = _team_key(team_a)
+        k_team_b = _team_key(team_b)
+        k_winner = _team_key(winner)
+
         card = _match_card(
             title,
-            _entry(team_a, score_a, team_a == winner),
-            _entry(team_b, score_b, team_b == winner),
+            _entry(team_a, score_a, k_team_a == k_winner),
+            _entry(team_b, score_b, k_team_b == k_winner),
             ref=ref,
             status="FINAL" if known else "SIM",
         )
@@ -1958,6 +2265,8 @@ def build_simulated_bracket_state(ratings_lookup: dict, lgf: float, lga: float,
 
     left_winners, right_winners = [], []
     for ref in LEFT_R32_MATCH_REFS:
+        # a, b are pulled directly from DEFAULT_R32_TEAMS in bracket order —
+        # this ordering is what play_card's team_a/team_b now strictly honor.
         a, b = DEFAULT_R32_TEAMS[ref]
         card, winner, _, _, _ = play_card("R32", a, b, ref=ref, is_r32=True)
         left_r32.append(card)
@@ -1971,11 +2280,11 @@ def build_simulated_bracket_state(ratings_lookup: dict, lgf: float, lga: float,
     left_r16, left_r16_winners, _ = play_round(left_winners, "R16")
     left_qf, left_qf_winners, _ = play_round(left_r16_winners, "QF")
     left_sf, left_sf_winners, left_sf_losers = play_round(left_qf_winners, "SF")
-    
+
     right_r16, right_r16_winners, _ = play_round(right_winners, "R16")
     right_qf, right_qf_winners, _ = play_round(right_r16_winners, "QF")
     right_sf, right_sf_winners, right_sf_losers = play_round(right_qf_winners, "SF")
-    
+
     final_card, champion, _, champ_pct, _ = play_card("Final", left_sf_winners[0], right_sf_winners[0])
     third_card, _, _, _, _ = play_card("Third Place", left_sf_losers[0], right_sf_losers[0])
 
@@ -1986,7 +2295,7 @@ def build_simulated_bracket_state(ratings_lookup: dict, lgf: float, lga: float,
     }
 
 
-def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max_items: int = 12) -> list[str]:
+def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max_items: int = 16) -> list[str]:
     items: list[str] = []
     rankings = fetch_dynamic_fifa_rankings()
 
@@ -2000,16 +2309,24 @@ def _ticker_items_from_data(live_df: pd.DataFrame, results_df: pd.DataFrame, max
         for _, row in results_df.head(max_items).iterrows():
             home = row.get("Home", "")
             away = row.get("Away", "")
-            score = row.get("Score", "- -")
+            
+            # --- FIXED: Use your display helper to grab the penalty-inclusive scoreline ---
+            home_score, away_score = _fixture_score(row)
+            if home_score and away_score:
+                score = f"{home_score} - {away_score}"
+            else:
+                score = row.get("Score", "- -")
+                
             winner = _fixture_winner(row)
             
-            # Updated ticker logic: classify draws as red (upsets)
+            # Classify draws versus definitive outcomes for marquee color flashes
+            # If the base goals are equal, it counts as a match draw (even if a shootout settled progression)
+            hg = row.get("Home Goals")
+            ag = row.get("Away Goals")
             try:
-                hg = float(row.get("Home Goals"))
-                ag = float(row.get("Away Goals"))
-                is_draw = (hg == ag)
+                is_draw = (float(hg) == float(ag))
             except:
-                is_draw = False
+                is_draw = "-" in score and score.split("-")[0].strip() == score.split("-")[1].strip()
 
             ticker_str = f"⚽ {home} {score} {away}"
             
@@ -2090,7 +2407,7 @@ def _is_confirmed_team(name) -> bool:
 
 
 ACTIVE_FIXTURE_STATUSES = {"SCHEDULED", "TIMED", "IN_PLAY"}
-COMPLETED_FIXTURE_STATUSES = {"FINISHED"}
+COMPLETED_FIXTURE_STATUSES = {"FINISHED", "TIMED"}
 
 
 def compute_active_teams(fixtures_df: pd.DataFrame) -> set[str]:
@@ -2432,102 +2749,107 @@ def render_live_fixtures_tab(api_key, live_df, fixtures_df, results_df, wc_fixtu
 def _build_insight_cards(team_stats_df: pd.DataFrame, active_teams: set[str],
                           eliminated_teams: set[str] = frozenset()) -> list[tuple]:
     df = team_stats_df
-    has_gp = "Games Played" in df.columns
-    played = df[df["Games Played"] > 0] if has_gp else df
-    spread_df = (df.dropna(subset=["Rating", "Elo Mod"]) if {"Rating", "Elo Mod"}.issubset(df.columns) else df.iloc[0:0])
+    if df.empty:
+        return [("ℹ️", "Data", "N/A", "Waiting for API")]
 
+    active_df = df[df["Team"].isin(active_teams)] if active_teams else df
     cards = []
 
-    # 👹 Battle-Tested - highest SoS among teams NOT already eliminated
-    sos_df = played.dropna(subset=["SoS"]) if "SoS" in played.columns else played.iloc[0:0]
-    if not sos_df.empty and eliminated_teams:
-        elim_list = {t.strip().lower() for t in eliminated_teams}
-        sos_df = sos_df[~sos_df["Team"].str.strip().str.lower().isin(elim_list)]
-        
-    if not sos_df.empty:
-        row = sos_df.loc[sos_df["SoS"].idxmax()]
-        cards.append(("👹", "Battle-Tested", row["Team"], f"SoS {row['SoS']:.1f}"))
+    # --- 1. Battle-Tested (never "None") ---
+    bt_pool = active_df if not active_df.empty else df
+    if "SoS" in bt_pool.columns and bt_pool["SoS"].notna().any():
+        idx = bt_pool["SoS"].idxmax()
+        row = bt_pool.loc[idx]
+        cards.append(("👹", "Battle-Tested", row["Team"], f"Avg SoS {row['SoS']:.1f}"))
     else:
-        cards.append(("👹", "Battle-Tested", None, "No data yet"))
+        row = bt_pool.sort_values("Rating", ascending=False).iloc[0]
+        cards.append(("👹", "Battle-Tested", row["Team"], f"Rating {row['Rating']:.3f}"))
 
-    # ... (Keep the rest of your existing card logic here)
-    # 🚀 Dark Horse
-    if not spread_df.empty:
-        spread = spread_df["Rating"] - spread_df["Elo Mod"]
-        idx = spread.idxmax()
-        row = spread_df.loc[idx]
-        cards.append(("🚀", "Dark Horse", row["Team"], f"+{spread.loc[idx]:.3f} vs Elo"))
+    # --- 2. Dark Horse (never "None") — pure underdog: low Elo Mod, high Rating ---
+    dh_pool_source = active_df if not active_df.empty else df
+    if "Elo Mod" in dh_pool_source.columns and "Rating" in dh_pool_source.columns:
+        if len(dh_pool_source) > 3:
+            threshold = max(dh_pool_source["Elo Mod"].quantile(0.4), 0.80)
+        else:
+            threshold = 0.80
+        dh_pool = dh_pool_source[dh_pool_source["Elo Mod"] < threshold]
+        if dh_pool.empty:
+            dh_pool = dh_pool_source
+
+        dh_pool = dh_pool.copy()
+        safe_elo = dh_pool["Elo Mod"].replace(0, 0.01)
+        dh_pool["dark_horse_score"] = dh_pool["Rating"] / safe_elo
+        idx = dh_pool["dark_horse_score"].idxmax()
+        row = dh_pool.loc[idx]
+        cards.append(("🚀", "Dark Horse", row["Team"], f"Rating {row['Rating']:.3f}"))
     else:
-        cards.append(("🚀", "Dark Horse", None, "No data yet"))
+        row = dh_pool_source.sort_values("Rating", ascending=False).iloc[0]
+        cards.append(("🚀", "Dark Horse", row["Team"], f"Rating {row['Rating']:.3f}"))
 
-    # 🏆 Best Form
-    if not played.empty and "PPG" in played.columns:
-        row = played.loc[played["PPG"].idxmax()]
+    # --- 3. Best Form (Safe indexing) ---
+    if not active_df.empty and "PPG" in active_df.columns and active_df["PPG"].notna().any():
+        row = active_df.loc[active_df["PPG"].idxmax()]
         cards.append(("🏆", "Best Form", row["Team"], f"{row['PPG']:.2f} PPG"))
     else:
-        cards.append(("🏆", "Best Form", None, "No data yet"))
+        row = df.loc[df["PPG"].idxmax()]
+        cards.append(("🏆", "Best Form", row["Team"], f"{row['PPG']:.2f} PPG"))
 
-    # ⚔️ Goal Machine
-    gm_pool = played[played["Team"].isin(active_teams)] if active_teams else played
-    if gm_pool.empty: gm_pool = played
-    if not gm_pool.empty and "GF/Game" in gm_pool.columns:
-        row = gm_pool.loc[gm_pool["GF/Game"].idxmax()]
+    # --- 4. Goal Machine (Safe indexing) ---
+    if not active_df.empty and "GF/Game" in active_df.columns and active_df["GF/Game"].notna().any():
+        row = active_df.loc[active_df["GF/Game"].idxmax()]
         cards.append(("⚔️", "Goal Machine", row["Team"], f"{row['GF/Game']:.2f} GF/Game"))
     else:
-        cards.append(("⚔️", "Goal Machine", None, "No data yet"))
+        cards.append(("⚔️", "Goal Machine", "None", "—"))
 
-    # 🛡️ Fortress
-    if not played.empty and "GA/Game" in played.columns:
-        row = played.loc[played["GA/Game"].idxmin()]
+    # --- 5. Fortress (Safe indexing) ---
+    if not active_df.empty and "GA/Game" in active_df.columns and active_df["GA/Game"].notna().any():
+        row = active_df.loc[active_df["GA/Game"].idxmin()]
         cards.append(("🛡️", "Fortress", row["Team"], f"{row['GA/Game']:.2f} GA/Game"))
     else:
-        cards.append(("🛡️", "Fortress", None, "No data yet"))
+        cards.append(("🛡️", "Fortress", "None", "—"))
 
-    # 💪 Strongest Resume
-    if not df.empty and "Rating" in df.columns:
-        row = df.loc[df["Rating"].idxmax()]
-        cards.append(("💪", "Strongest Resume", row["Team"], f"{row['Rating']:.3f} Rating"))
+    # --- 6. Top Seed Alive ---
+    top_ratings = active_df.sort_values("Rating", ascending=False)
+    if not top_ratings.empty:
+        cards.append(("💪", "Top Seed Alive", top_ratings.iloc[0]["Team"], "Highest Rating"))
     else:
-        cards.append(("💪", "Strongest Resume", None, "No data yet"))
+        cards.append(("💪", "Top Seed Alive", "None", "—"))
 
-    # 📈 Rising Power
-    if not spread_df.empty:
-        rising = spread_df[(spread_df["Rating"] - spread_df["Elo Mod"]) >= 0.1]
-        if not rising.empty:
-            margin = rising["Rating"] - rising["Elo Mod"]
-            idx = margin.idxmax()
-            row = rising.loc[idx]
-            cards.append(("📈", "Rising Power", row["Team"], f"+{margin.loc[idx]:.3f} vs Elo"))
+    # --- 7. Rising Power — redefined to be distinct from Dark Horse ---
+    # Dark Horse measures Rating-vs-Elo (an underdog "quality" signal).
+    # Rising Power instead measures current-form-vs-Elo (a "momentum/surge"
+    # signal using PPG), so the two cards can never coincidentally point at
+    # the same underlying math. Heavyweights are excluded from the pool
+    # outright — Elo Mod >= 0.82 or Rating >= 0.80 — so a giant like France
+    # can never qualify, regardless of how hot its current form looks.
+    if not active_df.empty and "PPG" in active_df.columns and "Elo Mod" in active_df.columns:
+        rp_pool = active_df[
+            (active_df["Elo Mod"] < 0.82) & (active_df["Rating"] < 0.80)
+        ].copy()
+        if not rp_pool.empty and rp_pool["PPG"].notna().any():
+            # PPG is typically on a 0-3 scale; normalize onto the same
+            # 0-1-ish scale as Elo Mod so the gap is meaningful.
+            rp_pool["form_gap"] = (rp_pool["PPG"] / 3.0) - rp_pool["Elo Mod"]
+            idx = rp_pool["form_gap"].idxmax()
+            row = rp_pool.loc[idx]
+            cards.append(("📈", "Rising Power", row["Team"], f"+{row['form_gap']:.3f} form vs Elo"))
         else:
-            cards.append(("📈", "Rising Power", None, "No team clears +0.10"))
+            cards.append(("📈", "Rising Power", "None", "—"))
     else:
-        cards.append(("📈", "Rising Power", None, "No data yet"))
+        cards.append(("📈", "Rising Power", "None", "—"))
 
-    # 📉 Living on Reputation
-    if not spread_df.empty:
-        reputation = spread_df[(spread_df["Elo Mod"] - spread_df["Rating"]) >= 0.1]
-        if not reputation.empty:
-            margin = reputation["Elo Mod"] - reputation["Rating"]
-            idx = margin.idxmax()
-            row = reputation.loc[idx]
-            cards.append(("📉", "Living on Reputation", row["Team"], f"+{margin.loc[idx]:.3f} vs Rating"))
-        else:
-            cards.append(("📉", "Living on Reputation", None, "No team clears +0.10"))
-    else:
-        cards.append(("📉", "Living on Reputation", None, "No data yet"))
-
+    cards.append(("🛡️", "Teams Left", f"{len(active_teams)}", "Active"))
     return cards
 
 
 INSIGHT_CARD_LEGEND = [
     ("👹", "Battle-Tested", "Highest Strength-of-Schedule (SoS) among teams still alive in the tournament."),
     ("🚀", "Dark Horse", "Biggest positive gap between blended Rating and raw Elo Modifier - over-performing its reputation."),
-    ("🏆", "Best Form", "Highest points-per-game (PPG), time-decay weighted toward recent results."),
-    ("⚔️", "Goal Machine", "Highest goals-for-per-game (GF/Game) among teams still in the tournament."),
-    ("🛡️", "Fortress", "Lowest goals-against-per-game (GA/Game) - the stingiest defense."),
-    ("💪", "Strongest Resume", "Highest overall blended Rating (xP + SoS goals + Elo)."),
-    ("📈", "Rising Power", "Rating outpaces its Elo Modifier by 0.10 or more - trending up faster than its baseline reputation."),
-    ("📉", "Living on Reputation", "Elo Modifier outpaces Rating by 0.10 or more - coasting on reputation more than current form."),
+    ("🏆", "Best Form", "Highest points-per-game among teams still alive."),
+    ("⚔️", "Goal Machine", "Highest goals-for-per-game among teams still alive."),
+    ("🛡️", "Fortress", "Lowest goals-against-per-game among teams still alive."),
+    ("💪", "Top Seed Alive", "Highest blended Rating among teams still alive."),
+    ("📈", "Rising Power", "Biggest positive gap between current form (PPG) and baseline Elo Modifier among non-heavyweight teams - a momentum surge, distinct from Dark Horse's underdog quality signal."),
 ]
 
 
@@ -2805,39 +3127,43 @@ def render_match_predictor_tab(api_key, team_stats_df, model_bundle, wc_fixtures
         fig.update_layout(xaxis_title=f"{tb} Goals", yaxis_title=f"{ta} Goals", height=450)
         st.plotly_chart(fig, use_container_width=True)
 
-        # TACTICAL GAME-STATE TIMELINE PROJECTION
-        st.subheader("⏱️ Tactical Game-State Timeline Projection")
-        st.caption("Visualizing live win/draw/loss probability shifts before the 1st goal across a hypothetical 90-minute tied match state.")
-        
-        minutes = np.array([0, 15, 30, 45, 60, 75, 90])
-        
-        # Pull outcome probabilities percentages
-        actual_hw = pred["hw_blended"] if pred.get("ml_active") else hw_p
-        actual_dr = pred["dr_blended"] if pred.get("ml_active") else dr_p
-        actual_aw = pred["aw_blended"] if pred.get("ml_active") else aw_p
-        
-        base_hw = actual_hw / 100.0
-        base_dr = actual_dr / 100.0
-        base_aw = actual_aw / 100.0
-        
-        # Model a dynamic decay rate curve where the likelihood of a draw compounds as time elapses
-        timeline_dr = base_dr + (1.0 - base_dr) * (minutes / 90.0) ** 2
-        timeline_hw = base_hw * (1.0 - (minutes / 90.0) ** 2)
-        timeline_aw = base_aw * (1.0 - (minutes / 90.0) ** 2)
-        
-        fig_timeline = go.Figure()
-        fig_timeline.add_trace(go.Scatter(x=minutes, y=timeline_hw * 100, name=f"{ta} Win Chance", line=dict(color='#3498db', width=3)))
-        fig_timeline.add_trace(go.Scatter(x=minutes, y=timeline_dr * 100, name="Draw Chance", line=dict(color='#f1c40f', width=3, dash='dash')))
-        fig_timeline.add_trace(go.Scatter(x=minutes, y=timeline_aw * 100, name=f"{tb} Win Chance", line=dict(color='#e74c3c', width=3)))
-        
-        fig_timeline.update_layout(
-            xaxis_title="Match Minute",
+        # GOAL MARGIN DISTRIBUTION
+        st.subheader("Goal Margin Distribution (First 90 Minutes)")
+        st.caption("Projected structural variance of the match-up, grouped by final goal margin.")
+
+        margin_labels = [f"{ta} by 2+", f"{ta} by 1", "Draw", f"{tb} by 1", f"{tb} by 2+"]
+        margin_probs = [0.0, 0.0, 0.0, 0.0, 0.0]
+        for hg in range(matrix.shape[0]):
+            for ag in range(matrix.shape[1]):
+                diff = hg - ag
+                p = matrix[hg, ag]
+                if diff >= 2:
+                    margin_probs[0] += p
+                elif diff == 1:
+                    margin_probs[1] += p
+                elif diff == 0:
+                    margin_probs[2] += p
+                elif diff == -1:
+                    margin_probs[3] += p
+                else:
+                    margin_probs[4] += p
+        margin_probs = [p * 100 for p in margin_probs]
+
+        margin_colors = ['#1a5276', '#3498db', '#f1c40f', '#e67e22', '#922b21']
+        fig_margin = go.Figure(go.Bar(
+            x=margin_labels,
+            y=margin_probs,
+            marker_color=margin_colors,
+            text=[f"{p:.1f}%" for p in margin_probs],
+            textposition="outside",
+        ))
+        fig_margin.update_layout(
+            xaxis_title="Projected Goal Margin",
             yaxis_title="Probability (%)",
             height=350,
-            hovermode="x unified",
-            margin=dict(l=20, r=20, t=20, b=20)
+            margin=dict(l=20, r=20, t=20, b=20),
         )
-        st.plotly_chart(fig_timeline, use_container_width=True)
+        st.plotly_chart(fig_margin, use_container_width=True)
 
 
 def _team_is_active(team, active_teams: set[str], row: pd.Series) -> bool:
@@ -3023,6 +3349,8 @@ def render_app_body(api_key, live_df, fixtures_df, results_df, wc_fixtures_df,
         render_world_cup_tab(api_key, model_bundle)
 
 
+import streamlit.components.v1 as components
+
 def render_gemini_chatbot():
     """Renders a Gemini-powered AI Tournament Analyst chatbot aware of internal application states."""
     try:
@@ -3030,17 +3358,17 @@ def render_gemini_chatbot():
     except ImportError:
         st.warning("Please install `google-generativeai` to use the AI Analyst feature.")
         return
-    with st.sidebar:    
+    with st.sidebar:
         st.markdown("---")
         st.subheader("💬 AI Tournament Analyst")
-        
+
         api_key = None
         if "GEMINI_API_KEY" in st.secrets:
             api_key = st.secrets["GEMINI_API_KEY"]
-        
+
         if not api_key:
             api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter free Gemini API Key to enable the AI Analyst.")
-        
+
         if not api_key:
             st.info("To chat with the AI Analyst, provide a Gemini API Key via `st.secrets` or the sidebar.")
             return
@@ -3051,9 +3379,8 @@ def render_gemini_chatbot():
         wc_results = st.session_state.get("wc_results")
         has_simulated = wc_results is not None and not wc_results.empty
 
-        # Check for both Tournament Simulator results AND Match Predictor results
         match_data = st.session_state.get("prediction")
-        
+
         if not match_data:
             context_instruction = (
                 "The user has not run the match predictor yet. "
@@ -3067,7 +3394,6 @@ def render_gemini_chatbot():
                 "to provide detailed tactical and statistical insights."
             )
 
-        # ── Persona with Strict Context Awareness ──────────────────────────
         sys_instruction = (
             "You are Tactico, elite football analyst. Chatty, insightful, evidence-based. "
             "RULES:\n"
@@ -3076,16 +3402,16 @@ def render_gemini_chatbot():
             "3. MISSING H2H data? Don't say 'no data'. Say: 'Teams not in bracket. Run Match Predictor tab for H2H breakdown.'\n"
             "4. ANALYSIS: Always distinguish between 'Tournament Aggregate' (simulated) and 'Match Predictor' (single-match) data.\n"
             "5. TOPICS: Tactics, history, rankings, models, players.\n"
+            "6. Keep answers concise — you have a limited output budget, so prioritize the most useful insight first.\n"
             + f"\n\nCONTEXT: {context_instruction}"
         )
-        
+
         if has_simulated:
             full_results_text = wc_results.to_string()
             sys_instruction += f"\n\nCURRENT SIMULATION RESULTS (ALL TEAMS):\n{full_results_text}"
         else:
             sys_instruction += "\n\nNO TOURNAMENT SIMULATION DATA CURRENTLY AVAILABLE."
 
-        # ── Upgrade 3: individual player / squad awareness ─────────────────────
         def _format_squad_block(team_name: str, saf_data: dict, max_players: int = 30) -> str:
             players = (saf_data or {}).get("_players", [])
             if not players: return ""
@@ -3103,64 +3429,143 @@ def render_gemini_chatbot():
         if "chat_history" not in st.session_state:
             st.session_state["chat_history"] = []
 
-        # ── Pre-populated Welcome Message ─────────────────────────────────
         if not st.session_state["chat_history"]:
             welcome_msg = "👋 Hi! I'm Tactico. Ask me anything about the simulation logic, team chances, or tactical bottlenecks once you've run the tournament simulation!"
             st.session_state["chat_history"].append({"role": "assistant", "content": welcome_msg})
 
-        # Chat history UI render loop
         for msg in st.session_state["chat_history"]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Cooldown Rate Limiting Logic (60 seconds) — self-refreshing so the
-        # countdown is live and the input auto re-enables once time is up.
-        # Streamlit never re-checks wall-clock time on its own; without this
-        # sleep+rerun loop the warning (and the disabled input) would freeze
-        # in place until some unrelated interaction forced a rerun.
+        # ── Cooldown Rate Limiting Logic (non-blocking) ─────────────────────
+        # No server-side sleep loop. Remaining time is derived purely from a
+        # timestamp diff, and the visible countdown + the single rerun-on-
+        # expiry are both handled client-side via a lightweight JS timer, so
+        # the Python process never blocks and never polls in a loop.
+        # ── Cooldown Rate Limiting Logic (non-blocking, sidebar-only rerun) ──
+        # No server-side sleep loop, and no browser-level page reload either.
+        # A hidden st.button lives in the sidebar; a small JS timer decrements
+        # a visible countdown client-side and, only once, "clicks" that hidden
+        # button when the timer hits zero. A button click is a normal Streamlit
+        # interaction — it triggers the same lightweight script rerun as any
+        # other widget, without a hard browser reload or full-page flash.
         last_time = st.session_state.get("last_chat_time", 0.0)
-        remaining = 60.0 - (time.time() - last_time)
+        cooldown_duration = 60.0
+        elapsed = time.time() - last_time
+        remaining = cooldown_duration - elapsed
+
         if remaining > 0:
-            remaining_int = int(remaining) + 1
-            st.warning(f"⏳ Tactico is recharging — {remaining_int}s until your next tactical report.")
+            seconds_left = int(remaining) + 1
+            AUTO_RERUN_MARKER = "tactico_cooldown_expired_marker"
+
+            st.markdown(
+                f"""
+                <div style="font-size:0.85em;color:#f39c12;font-family:inherit;padding:2px 0;">
+                    ⏳ Tactico is recharging — <span id="tactico-timer">{seconds_left}</span>s until your next report.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Hidden trigger button — a real Streamlit widget, just visually
+            # hidden. Clicking it (via JS below) causes a normal script rerun.
+            st.button(AUTO_RERUN_MARKER, key="tactico_cooldown_rerun_btn")
+
+            components.html(
+                f"""
+                <script>
+                (function() {{
+                    // Hide the trigger button (it lives one level up, in the
+                    // real Streamlit DOM, not inside this component's iframe).
+                    const doc = window.parent.document;
+                    const buttons = doc.querySelectorAll('button');
+                    let triggerBtn = null;
+                    buttons.forEach(function(b) {{
+                        if (b.innerText.trim() === "{AUTO_RERUN_MARKER}") {{
+                            b.closest('div[data-testid="stButton"]').style.display = 'none';
+                            triggerBtn = b;
+                        }}
+                    }});
+
+                    let remaining = {seconds_left};
+                    const el = doc.getElementById("tactico-timer");
+                    const interval = setInterval(function() {{
+                        remaining -= 1;
+                        if (remaining <= 0) {{
+                            clearInterval(interval);
+                            if (triggerBtn) {{
+                                triggerBtn.click();  // normal rerun, no page reload
+                            }}
+                        }} else if (el) {{
+                            el.textContent = remaining;
+                        }}
+                    }}, 1000);
+                }})();
+                </script>
+                """,
+                height=0,
+            )
             disabled_input = True
-            time.sleep(1)
-            st.rerun()
         else:
             disabled_input = False
+        # ── Client-side input length guard ──────────────────────────────────
+        # Rough token approximation: ~4 characters per token for English text.
+        MAX_INPUT_CHARS = 4000  # ~1000-token operational ceiling
+        APPROX_CHARS_PER_TOKEN = 4
 
         if prompt := st.chat_input("Tactico is ready. Ask me anything about the simulation...", disabled=disabled_input):
-            st.session_state["chat_history"].append({"role": "user", "content": prompt})
-            st.session_state["last_chat_time"] = time.time()
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            approx_tokens = len(prompt) // APPROX_CHARS_PER_TOKEN
+            if len(prompt) > MAX_INPUT_CHARS:
+                st.warning(
+                    f"⚠️ That message is too long (~{approx_tokens} tokens estimated, "
+                    f"limit ~{MAX_INPUT_CHARS // APPROX_CHARS_PER_TOKEN} tokens). "
+                    "Please shorten it — Tactico won't process oversized prompts to protect the model context."
+                )
+            else:
+                st.session_state["chat_history"].append({"role": "user", "content": prompt})
+                st.session_state["last_chat_time"] = time.time()
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
-            with st.chat_message("assistant"):
-                # Sequential model array fallback configuration for robust quota management
-                models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro"]
-                response_content = None
-                
-                for model_name in models_to_try:
-                    try:
-                        model = genai.GenerativeModel(model_name, system_instruction=sys_instruction)
-                        chat = model.start_chat(history=[{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in st.session_state["chat_history"][:-1]])
-                        response = chat.send_message(prompt)
-                        response_content = response.text
-                        break  # Break out if successful execution is achieved
-                    except Exception as exc:
-                        # Continue to alternative fallback if rate-limited or quota exceeded
-                        if "429" in str(exc) or "ResourceExhausted" in str(exc):
-                            continue
-                        else:
-                            st.error(f"Error communicating with Gemini API ({model_name}): {exc}")
-                            break
-                            
-                if response_content:
-                    st.markdown(response_content)
-                    st.session_state["chat_history"].append({"role": "assistant", "content": response_content})
-                    st.rerun()
-                elif not disabled_input:
-                    st.error("All available Gemini endpoints are currently rate-limited. Please wait a short moment and try again.")
+                with st.chat_message("assistant"):
+                    # Sequential model array fallback configuration for robust quota
+                    # management. gemini-2.0-flash has been removed — it was shut
+                    # down by Google on June 1, 2026 and would 404 every time.
+                    models_to_try = [
+                        "gemini-3.5-flash",
+                        "gemini-3.1-flash-lite",
+                        "gemini-3-flash-preview",
+                        "gemini-2.5-flash",
+                        "gemini-2.5-flash-lite",
+                        "gemini-2.5-pro",
+                    ]
+                    response_content = None
+                    generation_config = genai.GenerationConfig(max_output_tokens=600)
+
+                    for model_name in models_to_try:
+                        try:
+                            model = genai.GenerativeModel(
+                                model_name,
+                                system_instruction=sys_instruction,
+                                generation_config=generation_config,
+                            )
+                            chat = model.start_chat(history=[{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in st.session_state["chat_history"][:-1]])
+                            response = chat.send_message(prompt)
+                            response_content = response.text
+                            break  # Break out if successful execution is achieved
+                        except Exception as exc:
+                            if "429" in str(exc) or "ResourceExhausted" in str(exc):
+                                continue
+                            else:
+                                st.error(f"Error communicating with Gemini API ({model_name}): {exc}")
+                                break
+
+                    if response_content:
+                        st.markdown(response_content)
+                        st.session_state["chat_history"].append({"role": "assistant", "content": response_content})
+                        st.rerun()
+                    else:
+                        st.error("All available Gemini endpoints are currently rate-limited. Please wait a short moment and try again.")
 
 # ============================================================================
 # 10. MAIN
@@ -3169,6 +3574,10 @@ def render_gemini_chatbot():
 def main():
     st.set_page_config(page_title="World Cup Predictor 2026", page_icon="⚽", layout="wide")
     _inject_global_css()
+
+    if st.sidebar.button("Hard Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     model_bundle = load_ml_model() if ML_AVAILABLE else None
     api_key, league_id, season, fixtures_count = render_sidebar()
