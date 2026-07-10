@@ -2013,42 +2013,42 @@ def _fixture_pair_lookup(wc_fixtures_df: pd.DataFrame) -> dict[tuple[str, str], 
 def _live_progression_card(title: str, first: str | None, second: str | None,
                            fixture_pair_lookup: dict[tuple[str, str], pd.Series]
                            ) -> tuple[dict, str | None, str | None]:
-    """Like `_progression_card`, but looks the matchup up in real fixture data
-    first. If both teams for this round are known, we check whether that
-    match has actually been played (by team pair, since R16+ don't have a
-    fixed match-ref like R32 does) and show its real score/winner. Falls back
-    to a blank-score placeholder card only when the match hasn't happened yet
-    (or isn't in the feed)."""
-    if not first or not second:
+    
+    # If both are missing, it's a completely unseeded bracket slot
+    if not first and not second:
         return _match_card(title, _blank_entry(), _blank_entry()), None, None
 
-    row = fixture_pair_lookup.get(_pair_key(first, second))
-    if row is not None:
-        home = row.get("Home", first) or first
-        away = row.get("Away", second) or second
-        
-        # Prevent inverted scores by aligning Home/Away with the Bracket progression slots
-        if _team_key(home) == _team_key(first):
-            home_score, away_score = _fixture_score(row)
-        else:
-            away_score, home_score = _fixture_score(row)
+    # If both teams are known, look up if they have played each other yet
+    if first and second:
+        row = fixture_pair_lookup.get(_pair_key(first, second))
+        if row is not None:
+            home = row.get("Home", first) or first
+            away = row.get("Away", second) or second
             
-        winner = _fixture_winner(row)
-        
-        # Use _team_key to guarantee the string matches perfectly for CSS green highlights
-        is_first_winner = _team_key(winner) == _team_key(first) if winner else False
-        is_second_winner = _team_key(winner) == _team_key(second) if winner else False
-        
-        card = _match_card(
-            title,
-            _entry(first, home_score, is_first_winner),
-            _entry(second, away_score, is_second_winner),
-            status=str(row.get("Status", "")),
-        )
-        loser = second if is_first_winner else (first if is_second_winner else None)
-        return card, winner, loser
+            if _team_key(home) == _team_key(first):
+                home_score, away_score = _fixture_score(row)
+            else:
+                away_score, home_score = _fixture_score(row)
+                
+            winner = _fixture_winner(row)
+            is_first_winner = _team_key(winner) == _team_key(first) if winner else False
+            is_second_winner = _team_key(winner) == _team_key(second) if winner else False
+            
+            card = _match_card(
+                title,
+                _entry(first, home_score, is_first_winner),
+                _entry(second, away_score, is_second_winner),
+                status=str(row.get("Status", "")),
+            )
+            loser = second if is_first_winner else (first if is_second_winner else None)
+            return card, winner, loser
 
-    return _progression_card(title, first, second)
+    # --- NEW PARTIAL ROUND FILLER EDGE CASE ---
+    # If one team is known but their opponent is still TBD, fill the known team slot!
+    first_entry = _entry(first) if first else _blank_entry()
+    second_entry = _entry(second) if second else _blank_entry()
+    
+    return _match_card(title, first_entry, second_entry), None, None
 
 
 def build_live_bracket_state(wc_fixtures_df: pd.DataFrame) -> dict:
@@ -2414,16 +2414,26 @@ COMPLETED_FIXTURE_STATUSES = {"FINISHED", "TIMED"}
 
 
 def compute_active_teams(fixtures_df: pd.DataFrame) -> set[str]:
-    """A team is 'alive' if it appears in any upcoming/in-play match.
-    Used by the World Cup Simulator tab (elimination-status styling) and the
-    Team Ratings insight cards, where 'still in the tournament' genuinely means
-    'has a fixture left to play'."""
     if fixtures_df is None or fixtures_df.empty or "Status" not in fixtures_df.columns:
         return set()
+        
+    # 1. Base check: Anyone in an upcoming or live match is active
     upcoming = fixtures_df[fixtures_df["Status"].isin(ACTIVE_FIXTURE_STATUSES)]
-    teams = set(upcoming.get("Home", pd.Series(dtype=str)).tolist()) | \
-            set(upcoming.get("Away", pd.Series(dtype=str)).tolist())
-    return {t for t in teams if _is_confirmed_team(t)}
+    active_teams = set(upcoming.get("Home", pd.Series(dtype=str)).tolist()) | \
+                   set(upcoming.get("Away", pd.Series(dtype=str)).tolist())
+                   
+    # 2. Pipeline check: Carry over winners who are in limbo between rounds
+    completed_knockout = fixtures_df[
+        (fixtures_df["Status"] == "FINISHED") & 
+        (fixtures_df["Stage"].isin(["ROUND_OF_16", "QUARTER_FINALS", "SEMI_FINALS"]))
+    ]
+    
+    for _, row in completed_knockout.iterrows():
+        winner = _fixture_winner(row)
+        if winner:
+            active_teams.add(winner)
+            
+    return {t for t in active_teams if _is_confirmed_team(t)}
 
 
 def compute_confirmed_teams(fixtures_df: pd.DataFrame) -> set[str]:
